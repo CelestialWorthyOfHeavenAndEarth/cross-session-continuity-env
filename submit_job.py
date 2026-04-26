@@ -33,6 +33,7 @@ try:
             "apt-get update && apt-get install -y git && "
             "git clone https://github.com/CelestialWorthyOfHeavenAndEarth/cross-session-continuity-env.git && "
             "cd cross-session-continuity-env && "
+            "pip install -r requirements.txt && "
             "pip install -q 'unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git' "
             "trl>=0.15.0 datasets>=2.0.0 transformers>=4.40.0 accelerate>=0.30.0 matplotlib && "
             "python training/hf_job_train.py"
