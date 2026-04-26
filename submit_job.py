@@ -44,13 +44,13 @@ try:
         flavor="a10g-large",  # A10G: 24GB VRAM, faster than L4, needed without Unsloth
     )
 
-    print(f"\n✅ Job submitted successfully!")
+    print(f"\n[OK] Job submitted successfully!")
     print(f"   Job ID  : {job.id}")
     print(f"   Status  : {job.status}")
     print(f"   Monitor : https://huggingface.co/spaces/{SPACE_ID}/jobs")
     print(f"\nWhen DONE (~1 hr), the model will automatically be pushed to the hub!")
 except Exception as e:
-    print(f"\n❌ Error submitting job: {e}")
+    print(f"\n[ERROR] Error submitting job: {e}")
     print("\nAlternative: Use Hugging Face Spaces 'JupyterLab' template.")
     print("1. Go to huggingface.co/spaces and create a new Docker space.")
     print("2. Choose 'JupyterLab' template.")
