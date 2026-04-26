@@ -328,19 +328,35 @@ def build_dataset(n: int):
 
 # ── GRPO Training ─────────────────────────────────────────────────────────────
 def main():
-    from unsloth import FastLanguageModel
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+    from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
     from trl import GRPOConfig, GRPOTrainer
 
-    print(f"Loading {MODEL_NAME}...")
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=MODEL_NAME, max_seq_length=1024, dtype=None, load_in_4bit=True,
+    print(f"Loading {MODEL_NAME} with bitsandbytes 4-bit + LoRA (no Unsloth)...")
+    bnb_cfg = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_use_double_quant=True,
     )
-    model = FastLanguageModel.get_peft_model(
-        model, r=LORA_R, lora_alpha=LORA_R,
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_NAME, quantization_config=bnb_cfg,
+        device_map="auto", torch_dtype=torch.bfloat16,
+    )
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    model = prepare_model_for_kbit_training(model)
+    lora_cfg = LoraConfig(
+        r=LORA_R, lora_alpha=LORA_R,
         target_modules=["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"],
-        lora_dropout=0, bias="none", use_gradient_checkpointing="unsloth",
+        lora_dropout=0, bias="none", task_type="CAUSAL_LM",
     )
-    
+    model = get_peft_model(model, lora_cfg)
+    model.print_trainable_parameters()
+
     dataset = build_dataset(NUM_PROMPTS)
     training_rewards = []
     _epoch_counter = [0]
@@ -354,7 +370,7 @@ def main():
             q = score_handoff(completion, tid)
             s2 = run_scripted_s2(tid, completion, seed=i, epoch=ep, total_epochs=EPOCHS)
             raw.append(0.4 * q + 0.6 * s2)
-        
+
         mu, sigma = np.mean(raw), np.std(raw)
         if sigma < 1e-6:
             raw = [r + random.gauss(0, 0.01) for r in raw]
@@ -371,17 +387,7 @@ def main():
     )
 
     trainer = GRPOTrainer(model=model, reward_funcs=reward_fn, args=cfg, train_dataset=dataset, processing_class=tokenizer)
-    
-    # ── Unsloth 2026.4.x bug workaround ──────────────────────────────────────
-    # UnslothGRPOTrainer._generate_and_score_completions() accesses vision token
-    # attributes even on text-only models. We MUST use -100 (not None) because
-    # Unsloth may call torch.tensor(protected) and torch.tensor([None]) crashes.
-    # -100 is a standard ignore_index sentinel; it is never a valid token ID.
-    for _attr in ("image_token_id", "vision_start_token_id", "vision_end_token_id"):
-        if not hasattr(trainer, _attr):
-            setattr(trainer, _attr, -100)
-    # ─────────────────────────────────────────────────────────────────────────
-    
+
     print(f"Starting training: {EPOCHS} epoch(s), {NUM_PROMPTS} prompts, group={NUM_GEN}")
     trainer.train()
     
@@ -434,7 +440,8 @@ def main():
     HF_TOKEN = os.environ.get('HF_TOKEN', '')
     if HF_TOKEN and not FAST_MODE:
         print("Pushing to Hub...")
-        model.push_to_hub_merged('Aswini-Kumar/cross-session-continuity-model', tokenizer, save_method='merged_16bit', token=HF_TOKEN)
+        model.push_to_hub('Aswini-Kumar/cross-session-continuity-model', token=HF_TOKEN)
+        tokenizer.push_to_hub('Aswini-Kumar/cross-session-continuity-model', token=HF_TOKEN)
         print("Model pushed!")
 
 if __name__ == "__main__":

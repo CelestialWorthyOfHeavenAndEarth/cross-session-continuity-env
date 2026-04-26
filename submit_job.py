@@ -1,7 +1,7 @@
 """
 Submit the Cross-Session Continuity GRPO training job to HF infrastructure.
 
-Cost: L4 GPU = ~$0.80/hr. Training takes ~1 hour. Total cost: < $1.00 from your $30 credits.
+Cost: A10G GPU = ~$1.05/hr. Training takes ~1 hour. Total cost: ~$1.00 from your $30 credits.
 
 Usage:
     set HF_TOKEN=hf_yourtoken
@@ -23,7 +23,7 @@ api = HfApi(token=TOKEN)
 
 print("Submitting HF training job...")
 print(f"  Target Space : {SPACE_ID}")
-print(f"  Hardware     : nvidia-l4 (~$0.80/hr)")
+print(f"  Hardware     : nvidia-a10g (~$1.05/hr, 24GB VRAM)")
 
 try:
     job = api.run_job(
@@ -34,14 +34,14 @@ try:
             "git clone https://github.com/CelestialWorthyOfHeavenAndEarth/cross-session-continuity-env.git && "
             "cd cross-session-continuity-env && "
             "pip install -r requirements.txt && "
-            "pip install -q 'unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git' "
-            "trl>=0.15.0 datasets>=2.0.0 'transformers==4.51.3' accelerate>=0.30.0 matplotlib torchvision>=0.25.0 && "
+            "pip install -q peft bitsandbytes "
+            "trl>=0.15.0 datasets>=2.0.0 'transformers==4.51.3' accelerate>=0.30.0 matplotlib && "
             "python3 training/hf_job_train.py"
         ],
         env={
             "HF_TOKEN": TOKEN,
         },
-        flavor="l4x1",  # Using L4 since 7B model training needs good VRAM
+        flavor="a10gx1",  # A10G: 24GB VRAM, faster than L4, needed without Unsloth
     )
 
     print(f"\n✅ Job submitted successfully!")
