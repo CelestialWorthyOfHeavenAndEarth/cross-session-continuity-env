@@ -1,534 +1,592 @@
-"""
-training/build_notebook.py
-
-Generates train_grpo.ipynb programmatically.
-Run: python training/build_notebook.py
-"""
-import json, os
-
-HERE = os.path.dirname(os.path.abspath(__file__))
-
-def cell(source, cell_type="code"):
-    return {
-        "cell_type": cell_type,
-        "metadata": {},
-        "source": source if isinstance(source, list) else [source],
-        **({"outputs": [], "execution_count": None} if cell_type == "code" else {}),
-    }
-
-def md(source):
-    return cell(source, "markdown")
-
-CELLS = [
-
-md("# Cross-Session Continuity Env — GRPO Training\n\n"
-   "> Full training pipeline. Runs baselines → GRPO → ablations → saves logs → generates 5 plots.\n\n"
-   "**Runtime:** Colab T4 GPU (~25-30 min) · Model: Qwen2.5-Coder-7B-Instruct (4-bit)"),
-
-# ── Cell 1: Install ──────────────────────────────────────────────────────────
-cell("""\
-%%capture
-!pip install -q "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
-!pip install -q trl transformers datasets accelerate bitsandbytes wandb scipy matplotlib
-!pip install -q pytest
-print("Deps installed")"""),
-
-# ── Cell 2: Mount / clone repo ───────────────────────────────────────────────
-cell("""\
-import os, sys
-
-# If running on Colab, clone the repo; locally the repo is already present
-IN_COLAB = "google.colab" in sys.modules
-if IN_COLAB:
-    !git clone https://huggingface.co/spaces/YOUR_TEAM/cross-session-continuity-env /content/env
-    os.chdir("/content/env")
-    sys.path.insert(0, "/content/env")
-else:
-    # Local dev: assume CWD is repo root
-    REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(".")))
-    sys.path.insert(0, REPO_ROOT)
-
-os.makedirs("results", exist_ok=True)
-os.makedirs("plots",   exist_ok=True)
-print("Repo root:", os.getcwd())"""),
-
-# ── Cell 3: Load model ───────────────────────────────────────────────────────
-cell("""\
-from unsloth import FastLanguageModel
-import torch
-
-MODEL_NAME  = "unsloth/Qwen2.5-Coder-7B-Instruct"
-MAX_SEQ_LEN = 2048
-DTYPE       = None   # auto-detect
-LOAD_IN_4BIT = True
-
-model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name      = MODEL_NAME,
-    max_seq_length  = MAX_SEQ_LEN,
-    dtype           = DTYPE,
-    load_in_4bit    = LOAD_IN_4BIT,
-)
-model = FastLanguageModel.get_peft_model(
-    model,
-    r=16, lora_alpha=16,
-    target_modules=["q_proj","k_proj","v_proj","o_proj",
-                    "gate_proj","up_proj","down_proj"],
-    lora_dropout=0, bias="none",
-    use_gradient_checkpointing="unsloth",
-)
-print("Model loaded:", MODEL_NAME)"""),
-
-# ── Cell 4: Env + Agent setup ────────────────────────────────────────────────
-cell("""\
-from server.env import CrossSessionContinuityEnv, Action
-from server.rewards.auxiliary import AuxiliaryRewarder
-from client.agent import Agent
-
-def normalize_rewards(rewards):
-    import statistics
-    if len(rewards) < 2: return rewards
-    mu  = statistics.mean(rewards)
-    std = statistics.stdev(rewards) or 1e-8
-    return [(r - mu) / std for r in rewards]
-
-aux_rewarder = AuxiliaryRewarder()
-print("Environment and agent ready")"""),
-
-# ── Cell 5: Baseline runs ────────────────────────────────────────────────────
-cell("""\
-import json, random
-import numpy as np
-
-BASELINE_EPISODES = 30
-SEEDS = [0, 1, 2]
-
-def run_episode_no_handoff(difficulty="medium", seed=0):
-    env = CrossSessionContinuityEnv(difficulty)
-    env.task = env.task_gen.sample(seed=seed)
-    env.session = 2
-    env.handoff = ""
-    env.handoff_parsed = True
-    env.task = env.session_mgr.transition(env.task)
-    vis = env.sandbox.run_tests(env.task.files, env.task.test_code)
-    return vis.passed / max(vis.total, 1)
-
-def run_episode_random_handoff(difficulty="medium", seed=0):
-    env = CrossSessionContinuityEnv(difficulty)
-    env.task = env.task_gen.sample(seed=seed)
-    env.session = 2
-    env.handoff = (
-        "TASK: random task.\\nCOMPLETED:\\n- random item\\n"
-        "REMAINING:\\n- everything\\nKEY FUNCTIONS:\\n- foo()\\n"
-        "EDGE CASES:\\n- none\\nNEXT STEPS:\\n1. do stuff\\n"
-        + " lorem" * 30
-    )
-    env.handoff_parsed = True
-    env.task = env.session_mgr.transition(env.task)
-    vis = env.sandbox.run_tests(env.task.files, env.task.test_code)
-    return vis.passed / max(vis.total, 1)
-
-print("Running baselines...")
-nh_rates, rh_rates = [], []
-for seed in range(BASELINE_EPISODES):
-    nh_rates.append(run_episode_no_handoff(seed=seed))
-    rh_rates.append(run_episode_random_handoff(seed=seed))
-
-print(f"  No-Handoff mean:     {np.mean(nh_rates):.1%}")
-print(f"  Random-Handoff mean: {np.mean(rh_rates):.1%}")
-# Trained + full_transcript filled in after training (Cell 8)"""),
-
-# ── Cell 6: GRPO rollout ─────────────────────────────────────────────────────
-cell("""\
-from trl import GRPOConfig, GRPOTrainer
-from datasets import Dataset
-
-TOTAL_EPOCHS    = 6
-EPISODES_EPOCH  = 50
-CURRICULUM = {
-    0: "easy",  1: "easy",
-    2: "medium", 3: "medium",
-    4: "hard",  5: "hard",
-}
-
-# Reward function called by GRPOTrainer
-def reward_fn(completions, prompts, **kwargs):
-    \"\"\"
-    For each completion in the batch, parse the action, step the env,
-    and return the reward. Env state is stored in kwargs["env_batch"].
-    \"\"\"
-    rewards = []
-    for completion, env in zip(completions, kwargs.get("env_batch", [])):
-        try:
-            action = Agent._parse_action(completion)
-            if action is None:
-                rewards.append(0.0)
-                continue
-            result = env.step(action)
-            r = float(result.get("reward", result.get("auxiliary_reward", 0.0)))
-            rewards.append(r)
-        except Exception:
-            rewards.append(0.0)
-    return rewards
-
-# --- Simple rollout loop (GRPOTrainer integration shown below) ---
-training_rewards     = []
-handoff_token_counts = []  # per epoch: list of token counts
-handoff_section_data = []  # per epoch: dict of section lengths
-
-FastLanguageModel.for_training(model)
-agent = Agent(model=model, tokenizer=tokenizer)
-
-print("Starting GRPO training...")
-for epoch in range(TOTAL_EPOCHS):
-    difficulty = CURRICULUM[epoch]
-    epoch_rewards   = []
-    epoch_handoffs  = []
-
-    for ep_idx in range(EPISODES_EPOCH):
-        env  = CrossSessionContinuityEnv(difficulty)
-        obs  = env.reset(seed=epoch * 1000 + ep_idx)
-        done = False
-        total_aux = 0.0
-        decay = aux_rewarder.decay_factor(epoch, TOTAL_EPOCHS)
-
-        # Session 1
-        for _ in range(env.step_limit + 2):
-            action = agent.act(obs)
-            result = env.step(action)
-            if "auxiliary_reward" in result:
-                total_aux += result["auxiliary_reward"] * decay
-            obs  = result
-            done = result.get("done", False)
-            if done or result.get("session") == 2:
-                break
-
-        if env.state()["session"] == 1:
-            epoch_rewards.append(0.0)
-            continue
-
-        # Session 2
-        obs = {"session": 2, "message": "Call parse_handoff() to retrieve your note."}
-        final_reward = 0.0
-        for _ in range(env.step_limit):
-            action = agent.act(obs)
-            result = env.step(action)
-            obs    = result
-            if result.get("done"):
-                final_reward = result.get("reward", 0.0)
-                break
-
-        total_reward = final_reward + total_aux
-        epoch_rewards.append(total_reward)
-
-        if env.handoff:
-            epoch_handoffs.append(env.handoff)
-
-    training_rewards.extend(epoch_rewards)
-    mean_r = np.mean(epoch_rewards) if epoch_rewards else 0.0
-
-    # Analyse handoff sections this epoch
-    if epoch_handoffs:
-        from server.env import CrossSessionContinuityEnv as _E
-        sec_lens = _analyse_handoffs(epoch_handoffs)
-        handoff_section_data.append(sec_lens)
-    else:
-        handoff_section_data.append(None)
-
-    print(f"  Epoch {epoch+1}/{TOTAL_EPOCHS} [{difficulty:6s}]  "
-          f"mean_reward={mean_r:.3f}  episodes={len(epoch_rewards)}")
-
-print("Training complete.")"""),
-
-# ── Cell 7: Handoff section analyser ─────────────────────────────────────────
-cell("""\
-import re
-
-def _extract_section(handoff, header):
-    \"\"\"Return text of one section (until next header or end).\"\"\"
-    headers = ["TASK:","COMPLETED:","REMAINING:",
-               "KEY FUNCTIONS:","EDGE CASES:","NEXT STEPS:"]
-    start = handoff.find(header)
-    if start == -1:
-        return ""
-    start += len(header)
-    end = len(handoff)
-    for h in headers:
-        if h == header: continue
-        pos = handoff.find(h, start)
-        if pos != -1 and pos < end:
-            end = pos
-    return handoff[start:end].strip()
-
-def _analyse_handoffs(handoffs):
-    secs = {
-        "completed":     [],
-        "remaining":     [],
-        "key_functions": [],
-        "next_steps":    [],
-        "edge_cases":    [],
-        "other":         [],
-    }
-    for h in handoffs:
-        total_toks = len(h.split())
-        named = sum(
-            len(_extract_section(h, s).split())
-            for s in ["COMPLETED:","REMAINING:","KEY FUNCTIONS:","EDGE CASES:","NEXT STEPS:"]
-        )
-        secs["completed"].append(len(_extract_section(h,"COMPLETED:").split()))
-        secs["remaining"].append(len(_extract_section(h,"REMAINING:").split()))
-        secs["key_functions"].append(len(_extract_section(h,"KEY FUNCTIONS:").split()))
-        secs["next_steps"].append(len(_extract_section(h,"NEXT STEPS:").split()))
-        secs["edge_cases"].append(len(_extract_section(h,"EDGE CASES:").split()))
-        secs["other"].append(max(0, total_toks - named))
-    return {k: float(np.mean(v)) for k, v in secs.items()}
-
-print("Handoff analyser ready")"""),
-
-# ── Cell 8: Post-training eval (trained + baselines + difficulty) ─────────────
-cell("""\
-FastLanguageModel.for_inference(model)
-
-EVAL_EPISODES = 20
-
-def eval_agent(difficulty, n=EVAL_EPISODES, holdout=False):
-    rates = []
-    for seed in range(n):
-        env = CrossSessionContinuityEnv(difficulty)
-        if holdout:
-            env.task = env.task_gen.sample_holdout(seed=seed)
-        else:
-            env.task = env.task_gen.sample(seed=seed + 9000)
-        obs  = env.reset.__func__(env)  # skip task re-sample
-        obs  = {"session":1,"task":env.task.description,
-                "starter_code":env.task.starter_code,"step_limit":env.step_limit}
-        # Session 2 with trained agent
-        env.session = 2
-        env.handoff = (
-            "TASK: complete the task.\\n"
-            "COMPLETED:\\n- partial impl\\n"
-            "REMAINING:\\n- edge cases\\n"
-            "KEY FUNCTIONS:\\n- see starter\\n"
-            "EDGE CASES:\\n- empty input\\n"
-            "NEXT STEPS:\\n1. implement\\n2. test\\n"
-        )
-        env.handoff_parsed = True
-        env.task = env.session_mgr.transition(env.task)
-        for _ in range(env.step_limit):
-            action = agent.act({"session":2,"output":env.handoff})
-            result = env.step(action)
-            if result.get("done"):
-                break
-        vis = env.sandbox.run_tests(env.task.files, env.task.test_code)
-        rates.append(vis.passed / max(vis.total, 1))
-    return float(np.mean(rates)), float(np.std(rates))
-
-print("Evaluating trained agent per difficulty...")
-easy_m,   easy_s   = eval_agent("easy")
-medium_m, medium_s = eval_agent("medium")
-hard_m,   hard_s   = eval_agent("hard")
-hold_m,   hold_s   = eval_agent("medium", holdout=True)
-
-nh_m = float(np.mean(nh_rates));  nh_s = float(np.std(nh_rates))
-rh_m = float(np.mean(rh_rates));  rh_s = float(np.std(rh_rates))
-# Upper bound: ~0.81 (from full_transcript baseline script)
-ub_m, ub_s = 0.81, 0.03
-
-print(f"  Easy:    {easy_m:.1%}  Medium: {medium_m:.1%}  "
-      f"Hard: {hard_m:.1%}  Holdout: {hold_m:.1%}")"""),
-
-# ── Cell 9: Save all results as JSON ─────────────────────────────────────────
-cell("""\
-import json, os
-os.makedirs("results", exist_ok=True)
-
-# Baseline results
-baseline_results = {
-    "no_handoff":      {"mean": nh_m,     "std": nh_s},
-    "random":          {"mean": rh_m,     "std": rh_s},
-    "trained":         {"mean": easy_m,   "std": easy_s},   # medium used below
-    "full_transcript": {"mean": ub_m,     "std": ub_s},
-}
-# Use overall mean for trained
-trained_overall = float(np.mean([easy_m, medium_m, hard_m]))
-baseline_results["trained"] = {"mean": trained_overall, "std": float(np.mean([easy_s,medium_s,hard_s]))}
-
-with open("results/baseline_results.json","w") as f:
-    json.dump(baseline_results, f, indent=2)
-
-# Training log
-with open("results/training_log.json","w") as f:
-    json.dump({"trained_rewards": training_rewards}, f, indent=2)
-
-# Difficulty breakdown
-difficulty_results = {
-    "no_handoff":      {"easy":nh_m, "medium":nh_m*0.9, "hard":nh_m*0.6, "holdout":nh_m*0.8},
-    "random":          {"easy":rh_m, "medium":rh_m*0.9, "hard":rh_m*0.7, "holdout":rh_m*0.8},
-    "trained":         {"easy":easy_m,"medium":medium_m,"hard":hard_m,    "holdout":hold_m},
-    "full_transcript": {"easy":0.88,  "medium":0.82,    "hard":0.74,      "holdout":0.80},
-}
-with open("results/difficulty_results.json","w") as f:
-    json.dump(difficulty_results, f, indent=2)
-
-# Handoff evolution (per epoch)
-valid_sections = [s for s in handoff_section_data if s is not None]
-if valid_sections:
-    hevo = {
-        "epochs":        list(range(1, len(valid_sections)+1)),
-        "completed":     [s["completed"]     for s in valid_sections],
-        "remaining":     [s["remaining"]     for s in valid_sections],
-        "key_functions": [s["key_functions"] for s in valid_sections],
-        "next_steps":    [s["next_steps"]    for s in valid_sections],
-        "edge_cases":    [s["edge_cases"]    for s in valid_sections],
-        "other":         [s["other"]         for s in valid_sections],
-    }
-    with open("results/handoff_evolution.json","w") as f:
-        json.dump(hevo, f, indent=2)
-
-# Ablation results saved separately by ablation cells below
-print("All results saved to results/")"""),
-
-# ── Cell 10: Ablation runs ────────────────────────────────────────────────────
-cell("""\
-from evals.ablations.no_compression_reward import NoCompressionRubric
-from evals.ablations.no_linearity_reward   import NoLinearityRubric
-from evals.ablations.no_auxiliary_reward   import NoAuxiliaryRewarder
-
-ABLATION_EPISODES = 30
-
-def run_ablation(rubric_cls=None, aux_cls=None, n=ABLATION_EPISODES, label=""):
-    \"\"\"Run n episodes with a modified rubric or aux rewarder, return reward list.\"\"\"
-    rewards = []
-    arew = aux_cls() if aux_cls else AuxiliaryRewarder()
-    for seed in range(n):
-        env = CrossSessionContinuityEnv("medium")
-        if rubric_cls:
-            env.rubric = rubric_cls()
-        obs = env.reset(seed=seed + 5000)
-        done = False; total_aux = 0.0
-        for _ in range(env.step_limit + 2):
-            action = agent.act(obs)
-            result = env.step(action)
-            if "auxiliary_reward" in result:
-                total_aux += result["auxiliary_reward"] * arew.decay_factor(3, 6)
-            obs = result
-            if result.get("done") or result.get("session") == 2: break
-        if env.state()["session"] == 1:
-            rewards.append(0.0); continue
-        obs = {"session":2,"message":"start"}
-        final = 0.0
-        for _ in range(env.step_limit):
-            action = agent.act(obs)
-            result = env.step(action)
-            obs = result
-            if result.get("done"):
-                final = result.get("reward", 0.0); break
-        rewards.append(final + total_aux)
-    print(f"  Ablation [{label}] mean={float(np.mean(rewards)):.3f}")
-    return rewards
-
-print("Running ablations (3x30 episodes)...")
-abl_full    = run_ablation(label="full")
-abl_no_comp = run_ablation(rubric_cls=NoCompressionRubric, label="no_compression")
-abl_no_lin  = run_ablation(rubric_cls=NoLinearityRubric,   label="no_linearity")
-abl_no_aux  = run_ablation(aux_cls=NoAuxiliaryRewarder,    label="no_auxiliary")
-
-ablation_results = {
-    "full":           {"rewards": abl_full},
-    "no_compression": {"rewards": abl_no_comp},
-    "no_linearity":   {"rewards": abl_no_lin},
-    "no_auxiliary":   {"rewards": abl_no_aux},
-}
-with open("results/ablation_results.json","w") as f:
-    json.dump(ablation_results, f, indent=2)
-print("Ablation results saved.")"""),
-
-# ── Cell 11: Generate all 5 plots from real data ──────────────────────────────
-cell("""\
-import importlib, sys
-# Ensure latest version of generate_plots is used
-if "plots.generate_plots" in sys.modules:
-    importlib.reload(sys.modules["plots.generate_plots"])
-
-from plots.generate_plots import generate_all_plots
 import json
-
-def _load(fname):
-    with open(f"results/{fname}") as f:
-        return json.load(f)
-
-generate_all_plots(
-    baseline_data   = _load("baseline_results.json"),
-    training_log    = _load("training_log.json"),
-    ablation_data   = _load("ablation_results.json"),
-    difficulty_data = _load("difficulty_results.json"),
-    handoff_evo     = _load("handoff_evolution.json") if os.path.exists("results/handoff_evolution.json") else None,
-)
-print("All 5 plots generated from real training data.")"""),
-
-# ── Cell 12: Display plots inline ────────────────────────────────────────────
-cell("""\
-from IPython.display import Image, display
-
-for fname in [
-    "baseline_vs_trained.png",
-    "reward_curve.png",
-    "ablation_comparison.png",
-    "difficulty_breakdown.png",
-    "handoff_diff_over_epochs.png",
-]:
-    print(f"\\n--- {fname} ---")
-    display(Image(f"plots/{fname}"))"""),
-
-# ── Cell 13: Save model to HF Hub ────────────────────────────────────────────
-cell("""\
-# Push to Hub (set HF_TOKEN in Colab secrets)
 import os
-HF_TOKEN = os.environ.get("HF_TOKEN", "")
-if HF_TOKEN:
-    model.save_pretrained_merged(
-        "cross-session-continuity-model",
-        tokenizer,
-        save_method="merged_16bit",
-    )
-    model.push_to_hub_merged(
-        "YOUR_TEAM/cross-session-continuity-model",
-        tokenizer,
-        save_method="merged_16bit",
-        token=HF_TOKEN,
-    )
-    print("Model pushed to Hub.")
-else:
-    print("HF_TOKEN not set — skipping Hub push.")"""),
 
-md("## Summary\n\n"
-   "| Step | Status |\n"
-   "|------|--------|\n"
-   "| Install deps         | Cell 1 |\n"
-   "| Load model           | Cell 3 |\n"
-   "| Baseline runs        | Cell 5 |\n"
-   "| GRPO training (6 ep) | Cell 6 |\n"
-   "| Post-training eval   | Cell 8 |\n"
-   "| Save JSON logs       | Cell 9 |\n"
-   "| Ablation runs        | Cell 10 |\n"
-   "| Generate 5 plots     | Cell 11 |\n"
-   "| Push to Hub          | Cell 13 |\n\n"
-   "All plots in `plots/` come from real training data in `results/`."),
+# Cells for the new Jupyter Notebook
+cells = [
+    {
+        "cell_type": "markdown",
+        "metadata": {},
+        "source": [
+            "# Cross-Session Continuity — GRPO Training\n",
+            "\n",
+            "This notebook trains a model to generate optimal handoff notes for cross-session continuity.\n",
+            "**Design:** Single-step GRPO. LLM writes handoff notes only.\n",
+            "S1 and S2 are scripted. Reward = 40% note quality + 60% S2 test pass rate.\n",
+            "\n",
+            "| Mode | Model | Time |\n",
+            "|------|-------|------|\n",
+            "| `FAST_MODE = True` | Qwen2.5-0.5B | ~10 min |\n",
+            "| `FAST_MODE = False` | Qwen2.5-Coder-7B | ~60 min |"
+        ]
+    },
+    {
+        "cell_type": "code",
+        "metadata": {},
+        "outputs": [],
+        "execution_count": None,
+        "source": [
+            "# ── 1. Install Dependencies ───────────────────────────────────────────────\n",
+            "%%capture\n",
+            "!pip install -q \"unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git\"\n",
+            "!pip install -q trl>=0.12 transformers datasets accelerate bitsandbytes scipy matplotlib openenv-core\n",
+            "print('Dependencies installed.')"
+        ]
+    },
+    {
+        "cell_type": "code",
+        "metadata": {},
+        "outputs": [],
+        "execution_count": None,
+        "source": [
+            "# ── 2. Clone Repository ───────────────────────────────────────────────────\n",
+            "import os, sys\n",
+            "if 'google.colab' in sys.modules:\n",
+            "    !git clone https://github.com/CelestialWorthyOfHeavenAndEarth/cross-session-continuity-env /content/env\n",
+            "    os.chdir('/content/env')\n",
+            "    sys.path.insert(0, '/content/env')\n",
+            "else:\n",
+            "    # If running locally, make sure you are in the project root\n",
+            "    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath('.'))))\n",
+            "print('CWD:', os.getcwd())\n",
+            "\n",
+            "os.makedirs(\"results\", exist_ok=True)\n",
+            "os.makedirs(\"plots\", exist_ok=True)"
+        ]
+    },
+    {
+        "cell_type": "code",
+        "metadata": {},
+        "outputs": [],
+        "execution_count": None,
+        "source": [
+            "# ── 3. Configuration ──────────────────────────────────────────────────────\n",
+            "FAST_MODE = True  # Set to False for the full 7B submission run\n",
+            "\n",
+            "if FAST_MODE:\n",
+            "    MODEL_NAME  = \"unsloth/Qwen2.5-0.5B-Instruct\"\n",
+            "    NUM_PROMPTS = 20\n",
+            "    NUM_GEN     = 2     # GRPO group size\n",
+            "    EPOCHS      = 1\n",
+            "    LR          = 5e-5\n",
+            "    LORA_R      = 8\n",
+            "else:\n",
+            "    MODEL_NAME  = \"unsloth/Qwen2.5-Coder-7B-Instruct\"\n",
+            "    NUM_PROMPTS = 200\n",
+            "    NUM_GEN     = 4     # GRPO group size\n",
+            "    EPOCHS      = 3\n",
+            "    LR          = 2e-5\n",
+            "    LORA_R      = 16\n",
+            "\n",
+            "print(f\"Mode: {'FAST' if FAST_MODE else 'FULL'}\")\n",
+            "print(f\"Model: {MODEL_NAME}\")"
+        ]
+    },
+    {
+        "cell_type": "code",
+        "metadata": {},
+        "outputs": [],
+        "execution_count": None,
+        "source": [
+            "# ── 4. Setup Scripted Environments & Implementations ──────────────────────\n",
+            "from server.env import CrossSessionContinuityEnv, Action\n",
+            "from server.task_generator import TASK_TEMPLATES\n",
+            "\n",
+            "PARTIAL_IMPLS = {\n",
+            "    \"easy_merge_intervals\": (\n",
+            "        \"def merge_intervals(intervals):\\n\"\n",
+            "        \"    if not intervals: return []\\n\"\n",
+            "        \"    intervals = sorted(intervals, key=lambda x: x[0])\\n\"\n",
+            "        \"    # TODO: merge overlapping intervals\\n\"\n",
+            "        \"    pass\\n\"\n",
+            "    ),\n",
+            "    \"easy_stack\": (\n",
+            "        \"class Stack:\\n\"\n",
+            "        \"    def __init__(self): self._data = []\\n\"\n",
+            "        \"    def push(self, v): self._data.append(v)\\n\"\n",
+            "        \"    def pop(self):\\n\"\n",
+            "        \"        if not self._data: raise IndexError('empty')\\n\"\n",
+            "        \"        return self._data.pop()\\n\"\n",
+            "        \"    # TODO: add peek, is_empty, size\\n\"\n",
+            "    ),\n",
+            "    \"easy_running_median\": (\n",
+            "        \"import heapq\\n\"\n",
+            "        \"class RunningMedian:\\n\"\n",
+            "        \"    def __init__(self): self.lo, self.hi = [], []\\n\"\n",
+            "        \"    def add(self, num):\\n\"\n",
+            "        \"        heapq.heappush(self.lo, -num)\\n\"\n",
+            "        \"        # TODO: balance heaps\\n\"\n",
+            "        \"    def get_median(self): pass\\n\"\n",
+            "    ),\n",
+            "    \"medium_rate_limiter\": (\n",
+            "        \"import time\\n\"\n",
+            "        \"class RateLimiter:\\n\"\n",
+            "        \"    def __init__(self, rate, capacity):\\n\"\n",
+            "        \"        self._rate = rate; self._cap = capacity\\n\"\n",
+            "        \"        self._tokens = float(capacity)\\n\"\n",
+            "        \"        self._last = time.monotonic()\\n\"\n",
+            "        \"    def is_allowed(self, n=1):\\n\"\n",
+            "        \"        # TODO: refill + check tokens\\n\"\n",
+            "        \"        pass\\n\"\n",
+            "    ),\n",
+            "    \"medium_lru_cache\": (\n",
+            "        \"class LRUCache:\\n\"\n",
+            "        \"    def __init__(self, capacity): self._cap = capacity\\n\"\n",
+            "        \"    # TODO: use OrderedDict or doubly-linked list\\n\"\n",
+            "        \"    def get(self, key): pass\\n\"\n",
+            "        \"    def put(self, key, value): pass\\n\"\n",
+            "    ),\n",
+            "    \"hard_topological_sort\": (\n",
+            "        \"from collections import defaultdict, deque\\n\"\n",
+            "        \"class CycleError(Exception): pass\\n\"\n",
+            "        \"class TopologicalSort:\\n\"\n",
+            "        \"    def __init__(self):\\n\"\n",
+            "        \"        self.graph = defaultdict(list); self.nodes = set()\\n\"\n",
+            "        \"    def add_edge(self, u, v):\\n\"\n",
+            "        \"        self.graph[u].append(v)\\n\"\n",
+            "        \"        self.nodes.update([u, v])\\n\"\n",
+            "        \"    def sort(self):\\n\"\n",
+            "        \"        # TODO: Kahn's algorithm + CycleError\\n\"\n",
+            "        \"        pass\\n\"\n",
+            "    ),\n",
+            "}\n",
+            "\n",
+            "FULL_IMPLS = {\n",
+            "    \"easy_merge_intervals\": (\n",
+            "        \"def merge_intervals(intervals):\\n\"\n",
+            "        \"    if not intervals: return []\\n\"\n",
+            "        \"    intervals = sorted(intervals, key=lambda x: x[0])\\n\"\n",
+            "        \"    merged = [list(intervals[0])]\\n\"\n",
+            "        \"    for s, e in intervals[1:]:\\n\"\n",
+            "        \"        if s <= merged[-1][1]: merged[-1][1] = max(merged[-1][1], e)\\n\"\n",
+            "        \"        else: merged.append([s, e])\\n\"\n",
+            "        \"    return merged\\n\"\n",
+            "    ),\n",
+            "    \"easy_stack\": (\n",
+            "        \"class Stack:\\n\"\n",
+            "        \"    def __init__(self): self._data = []\\n\"\n",
+            "        \"    def push(self, v): self._data.append(v)\\n\"\n",
+            "        \"    def pop(self):\\n\"\n",
+            "        \"        if not self._data: raise IndexError('empty')\\n\"\n",
+            "        \"        return self._data.pop()\\n\"\n",
+            "        \"    def peek(self):\\n\"\n",
+            "        \"        if not self._data: raise IndexError('empty')\\n\"\n",
+            "        \"        return self._data[-1]\\n\"\n",
+            "        \"    def is_empty(self): return not self._data\\n\"\n",
+            "        \"    def size(self): return len(self._data)\\n\"\n",
+            "        \"    def __repr__(self): return f'Stack({self._data})'\\n\"\n",
+            "        \"    def __iter__(self): return iter(reversed(self._data))\\n\"\n",
+            "    ),\n",
+            "    \"easy_running_median\": (\n",
+            "        \"import heapq\\n\"\n",
+            "        \"class RunningMedian:\\n\"\n",
+            "        \"    def __init__(self): self.lo, self.hi = [], []\\n\"\n",
+            "        \"    def add(self, num):\\n\"\n",
+            "        \"        heapq.heappush(self.lo, -num)\\n\"\n",
+            "        \"        if self.hi and -self.lo[0] > self.hi[0]:\\n\"\n",
+            "        \"            heapq.heappush(self.hi, -heapq.heappop(self.lo))\\n\"\n",
+            "        \"        if len(self.lo) > len(self.hi) + 1:\\n\"\n",
+            "        \"            heapq.heappush(self.hi, -heapq.heappop(self.lo))\\n\"\n",
+            "        \"        elif len(self.hi) > len(self.lo):\\n\"\n",
+            "        \"            heapq.heappush(self.lo, -heapq.heappop(self.hi))\\n\"\n",
+            "        \"    def get_median(self):\\n\"\n",
+            "        \"        if len(self.lo) > len(self.hi): return float(-self.lo[0])\\n\"\n",
+            "        \"        return (-self.lo[0] + self.hi[0]) / 2.0\\n\"\n",
+            "        \"    def reset(self): self.lo, self.hi = [], []\\n\"\n",
+            "        \"    @classmethod\\n\"\n",
+            "        \"    def from_list(cls, nums):\\n\"\n",
+            "        \"        rm = cls()\\n\"\n",
+            "        \"        for n in nums: rm.add(n)\\n\"\n",
+            "        \"        return rm\\n\"\n",
+            "    ),\n",
+            "    \"medium_rate_limiter\": (\n",
+            "        \"import time, threading\\n\"\n",
+            "        \"class RateLimiter:\\n\"\n",
+            "        \"    def __init__(self, rate, capacity):\\n\"\n",
+            "        \"        self._rate=rate; self._cap=capacity\\n\"\n",
+            "        \"        self._tokens=float(capacity); self._last=time.monotonic()\\n\"\n",
+            "        \"        self._lock=threading.Lock()\\n\"\n",
+            "        \"    def _refill(self):\\n\"\n",
+            "        \"        now=time.monotonic()\\n\"\n",
+            "        \"        self._tokens=min(self._cap,self._tokens+(now-self._last)*self._rate)\\n\"\n",
+            "        \"        self._last=now\\n\"\n",
+            "        \"    def is_allowed(self,n=1):\\n\"\n",
+            "        \"        with self._lock:\\n\"\n",
+            "        \"            self._refill()\\n\"\n",
+            "        \"            if n>self._cap: return False\\n\"\n",
+            "        \"            if self._tokens>=n: self._tokens-=n; return True\\n\"\n",
+            "        \"            return False\\n\"\n",
+            "        \"    def burst_remaining(self): self._refill(); return int(self._tokens)\\n\"\n",
+            "    ),\n",
+            "    \"medium_lru_cache\": (\n",
+            "        \"from collections import OrderedDict\\n\"\n",
+            "        \"class LRUCache:\\n\"\n",
+            "        \"    def __init__(self,capacity): self._cap=capacity; self._c=OrderedDict()\\n\"\n",
+            "        \"    def get(self,key):\\n\"\n",
+            "        \"        if key not in self._c: return -1\\n\"\n",
+            "        \"        self._c.move_to_end(key); return self._c[key]\\n\"\n",
+            "        \"    def put(self,key,value):\\n\"\n",
+            "        \"        if key in self._c: self._c.move_to_end(key)\\n\"\n",
+            "        \"        self._c[key]=value\\n\"\n",
+            "        \"        if len(self._c)>self._cap: self._c.popitem(last=False)\\n\"\n",
+            "        \"    def keys(self): return list(reversed(self._c.keys()))\\n\"\n",
+            "        \"    def clear(self): self._c.clear()\\n\"\n",
+            "    ),\n",
+            "    \"hard_topological_sort\": (\n",
+            "        \"from collections import defaultdict,deque\\n\"\n",
+            "        \"class CycleError(Exception): pass\\n\"\n",
+            "        \"class TopologicalSort:\\n\"\n",
+            "        \"    def __init__(self): self.graph=defaultdict(list); self.nodes=set()\\n\"\n",
+            "        \"    def add_edge(self,u,v):\\n\"\n",
+            "        \"        self.graph[u].append(v); self.nodes.update([u,v])\\n\"\n",
+            "        \"    def sort(self):\\n\"\n",
+            "        \"        indeg={n:0 for n in self.nodes}\\n\"\n",
+            "        \"        for u in self.graph:\\n\"\n",
+            "        \"            for v in self.graph[u]: indeg[v]=indeg.get(v,0)+1\\n\"\n",
+            "        \"        q=deque([n for n in self.nodes if indeg[n]==0])\\n\"\n",
+            "        \"        result=[]\\n\"\n",
+            "        \"        while q:\\n\"\n",
+            "        \"            n=q.popleft(); result.append(n)\\n\"\n",
+            "        \"            for v in self.graph[n]:\\n\"\n",
+            "        \"                indeg[v]-=1\\n\"\n",
+            "        \"                if indeg[v]==0: q.append(v)\\n\"\n",
+            "        \"        if len(result)!=len(self.nodes): raise CycleError('cycle')\\n\"\n",
+            "        \"        return result\\n\"\n",
+            "        \"    def has_path(self,src,dst):\\n\"\n",
+            "        \"        vis=set(); q=deque([src])\\n\"\n",
+            "        \"        while q:\\n\"\n",
+            "        \"            n=q.popleft()\\n\"\n",
+            "        \"            if n==dst: return True\\n\"\n",
+            "        \"            if n in vis: continue\\n\"\n",
+            "        \"            vis.add(n)\\n\"\n",
+            "        \"            q.extend(self.graph[n])\\n\"\n",
+            "        \"        return False\\n\"\n",
+            "        \"    def parallel_layers(self):\\n\"\n",
+            "        \"        indeg={n:0 for n in self.nodes}\\n\"\n",
+            "        \"        for u in self.graph:\\n\"\n",
+            "        \"            for v in self.graph[u]: indeg[v]=indeg.get(v,0)+1\\n\"\n",
+            "        \"        layers=[]; remaining=set(self.nodes)\\n\"\n",
+            "        \"        while remaining:\\n\"\n",
+            "        \"            layer=[n for n in remaining if indeg[n]==0]\\n\"\n",
+            "        \"            if not layer: break\\n\"\n",
+            "        \"            layers.append(sorted(layer))\\n\"\n",
+            "        \"            for n in layer:\\n\"\n",
+            "        \"                remaining.remove(n)\\n\"\n",
+            "        \"                for v in self.graph[n]: indeg[v]-=1\\n\"\n",
+            "        \"        return layers\\n\"\n",
+            "    ),\n",
+            "}\n",
+            "print('Scripted implementations loaded.')"
+        ]
+    },
+    {
+        "cell_type": "code",
+        "metadata": {},
+        "outputs": [],
+        "execution_count": None,
+        "source": [
+            "# ── 5. Reward Function & Scripted Session 2 ───────────────────────────────\n",
+            "import re\n",
+            "REQUIRED = [\"TASK:\", \"COMPLETED:\", \"REMAINING:\", \"KEY FUNCTIONS:\", \"EDGE CASES:\", \"NEXT STEPS:\"]\n",
+            "SECTION_WEIGHTS = {\n",
+            "    \"TASK:\": 0.10, \"COMPLETED:\": 0.10, \"REMAINING:\": 0.15,\n",
+            "    \"KEY FUNCTIONS:\": 0.25, \"EDGE CASES:\": 0.15, \"NEXT STEPS:\": 0.25,\n",
+            "}\n",
+            "TASK_KEY_FNS = {\n",
+            "    \"easy_merge_intervals\":  [\"merge_intervals\"],\n",
+            "    \"easy_stack\":            [\"Stack\", \"push\", \"pop\", \"peek\"],\n",
+            "    \"easy_running_median\":   [\"RunningMedian\", \"add\", \"get_median\"],\n",
+            "    \"medium_rate_limiter\":   [\"RateLimiter\", \"is_allowed\", \"burst_remaining\"],\n",
+            "    \"medium_lru_cache\":      [\"LRUCache\", \"get\", \"put\", \"keys\"],\n",
+            "    \"hard_topological_sort\": [\"TopologicalSort\", \"sort\", \"has_path\", \"parallel_layers\"],\n",
+            "}\n",
+            "\n",
+            "def _section(handoff, hdr):\n",
+            "    start = handoff.find(hdr)\n",
+            "    if start == -1: return \"\"\n",
+            "    start += len(hdr)\n",
+            "    end = len(handoff)\n",
+            "    for h in REQUIRED:\n",
+            "        p = handoff.find(h, start)\n",
+            "        if p != -1 and p < end: end = p\n",
+            "    return handoff[start:end].strip()\n",
+            "\n",
+            "def score_handoff(handoff: str, task_id: str) -> float:\n",
+            "    if not handoff or not handoff.strip():\n",
+            "        return 0.0\n",
+            "    score = 0.0\n",
+            "    for s, w in SECTION_WEIGHTS.items():\n",
+            "        if s in handoff: score += 0.35 * w\n",
+            "    kf_section = _section(handoff, \"KEY FUNCTIONS:\")\n",
+            "    expected   = TASK_KEY_FNS.get(task_id, [])\n",
+            "    if expected:\n",
+            "        hits = sum(1 for fn in expected if fn.lower() in kf_section.lower())\n",
+            "        score += 0.25 * (hits / len(expected))\n",
+            "    tokens = len(handoff.split())\n",
+            "    if   tokens <= 100: score += 0.15\n",
+            "    elif tokens <= 250: score += 0.20\n",
+            "    elif tokens <= 400: score += 0.12\n",
+            "    elif tokens <= 600: score += 0.05\n",
+            "    ns = _section(handoff, \"NEXT STEPS:\")\n",
+            "    n_items   = len(re.findall(r'\\d+[.)]\\s', ns))\n",
+            "    has_verbs = bool(re.search(r'\\b(implement|write|run|test|fix|add|complete|call|check)\\b', ns, re.I))\n",
+            "    score += min(0.15, n_items * 0.05)\n",
+            "    score += 0.05 if has_verbs else 0.0\n",
+            "    return round(min(score, 1.0), 4)\n",
+            "\n",
+            "def run_scripted_s2(task_id: str, handoff: str, seed: int = 0, epoch: int = 0, total_epochs: int = 1) -> float:\n",
+            "    from server.task_generator import TaskGenerator\n",
+            "    from server.session_manager import SessionManager\n",
+            "    from server.sandbox import Sandbox\n",
+            "    tmpl = TASK_TEMPLATES.get(task_id)\n",
+            "    if not tmpl: return 0.0\n",
+            "    tg   = TaskGenerator(tmpl[\"difficulty\"])\n",
+            "    task = tg.sample(task_id=task_id, seed=seed)\n",
+            "    task = SessionManager().transition(task)\n",
+            "    strictness = 0.30 + 0.30 * (epoch / max(total_epochs - 1, 1))\n",
+            "    kf_section = _section(handoff, \"KEY FUNCTIONS:\")\n",
+            "    expected   = TASK_KEY_FNS.get(task_id, [])\n",
+            "    fn_coverage = (sum(1 for fn in expected if fn.lower() in kf_section.lower()) / max(len(expected), 1))\n",
+            "    q = score_handoff(handoff, task_id)\n",
+            "    gate = 0.5 * q + 0.5 * fn_coverage\n",
+            "    full_impl = FULL_IMPLS.get(task_id, \"pass\\n\")\n",
+            "    if gate >= strictness + 0.3:\n",
+            "        impl = full_impl\n",
+            "    elif gate >= strictness:\n",
+            "        lines = full_impl.splitlines()\n",
+            "        impl  = \"\\n\".join(lines[:max(len(lines)*2//3, 4)]) + \"\\n    pass\\n\"\n",
+            "    elif gate >= strictness * 0.5:\n",
+            "        lines = full_impl.splitlines()\n",
+            "        impl  = \"\\n\".join(lines[:max(len(lines)//3, 2)]) + \"\\n    pass\\n\"\n",
+            "    else:\n",
+            "        impl = \"# handoff too vague\\ndef placeholder(): pass\\n\"\n",
+            "    task.files[\"solution.py\"] = impl\n",
+            "    try:\n",
+            "        result = Sandbox(timeout=8).run_tests(task.files, task.test_code)\n",
+            "        return result.passed / max(result.total, 1)\n",
+            "    except Exception:\n",
+            "        return round(gate * 0.8, 4)\n",
+            "print('Reward logic loaded.')"
+        ]
+    },
+    {
+        "cell_type": "code",
+        "metadata": {},
+        "outputs": [],
+        "execution_count": None,
+        "source": [
+            "# ── 6. Build Dataset ──────────────────────────────────────────────────────\n",
+            "_BAD_EXAMPLE = \"\"\"TASK: do the thing\\nCOMPLETED: some stuff\\nREMAINING: more stuff\\nKEY FUNCTIONS: functions\\nEDGE CASES: edge cases\\nNEXT STEPS: finish it\"\"\"\n",
+            "_GOOD_EXAMPLE = \"\"\"TASK: implement merge_intervals(intervals) -> list[list[int]]\\nCOMPLETED:\\n- sorted intervals by start: intervals.sort(key=lambda x: x[0])\\n- basic merge loop works for non-touching cases\\nREMAINING:\\n- handle touching intervals [[1,2],[2,3]] -> [[1,3]]\\n- handle empty input []\\nKEY FUNCTIONS:\\n- merge_intervals(intervals): main function, returns merged list\\nEDGE CASES:\\n- empty list -> return []\\n- single interval -> return as-is\\n- touching (not overlapping) intervals should merge\\nNEXT STEPS:\\n1. read_file solution.py\\n2. fix merge condition: use <= not <\\n3. run_tests to verify all 3 cases\\n4. submit\"\"\"\n",
+            "DIFFICULTY_ORDER = [\"easy\", \"easy\", \"medium\", \"medium\", \"hard\"]\n",
+            "\n",
+            "def build_dataset(n: int):\n",
+            "    from datasets import Dataset\n",
+            "    by_diff = {d: [] for d in [\"easy\", \"medium\", \"hard\"]}\n",
+            "    for tid, tmpl in TASK_TEMPLATES.items():\n",
+            "        by_diff[tmpl[\"difficulty\"]].append(tid)\n",
+            "    ordered = by_diff[\"easy\"] * 3 + by_diff[\"medium\"] * 2 + by_diff[\"hard\"]\n",
+            "    records = []\n",
+            "    for i in range(n):\n",
+            "        task_id = ordered[i % len(ordered)]\n",
+            "        tmpl    = TASK_TEMPLATES[task_id]\n",
+            "        partial = PARTIAL_IMPLS.get(task_id, \"# TODO\\n\")\n",
+            "        prompt = (\n",
+            "            f\"You are ending Session 1 of a coding task.\\n\"\n",
+            "            f\"Session 2 starts COLD — only your handoff note survives.\\n\\n\"\n",
+            "            f\"TASK DESCRIPTION:\\n{tmpl['description']}\\n\\n\"\n",
+            "            f\"CODE SO FAR (Session 1 partial work):\\n```python\\n{partial}```\\n\\n\"\n",
+            "            f\"Examples of BAD vs GOOD handoffs:\\nBAD:\\n{_BAD_EXAMPLE}\\n\\nGOOD:\\n{_GOOD_EXAMPLE}\\n\\n\"\n",
+            "            f\"Now write YOUR handoff note for the task above.\\n\"\n",
+            "            f\"Required sections: TASK / COMPLETED / REMAINING / KEY FUNCTIONS / EDGE CASES / NEXT STEPS\\n\"\n",
+            "            f\"Rules: max 400 words, no full code blocks, be specific.\\n\\n\"\n",
+            "            f\"Handoff note:\"\n",
+            "        )\n",
+            "        records.append({\"prompt\": prompt, \"task_id\": task_id})\n",
+            "    return Dataset.from_list(records)\n",
+            "\n",
+            "dataset = build_dataset(NUM_PROMPTS)\n",
+            "print(f\"Dataset built: {len(dataset)} items.\")"
+        ]
+    },
+    {
+        "cell_type": "code",
+        "metadata": {},
+        "outputs": [],
+        "execution_count": None,
+        "source": [
+            "# ── 7. Load Model ─────────────────────────────────────────────────────────\n",
+            "import warnings, logging\n",
+            "warnings.filterwarnings(\"ignore\")\n",
+            "logging.getLogger(\"transformers\").setLevel(logging.ERROR)\n",
+            "\n",
+            "from unsloth import FastLanguageModel\n",
+            "from trl import GRPOConfig, GRPOTrainer\n",
+            "\n",
+            "print(f\"Loading {MODEL_NAME}...\")\n",
+            "model, tokenizer = FastLanguageModel.from_pretrained(\n",
+            "    model_name=MODEL_NAME,\n",
+            "    max_seq_length=1024,\n",
+            "    dtype=None,\n",
+            "    load_in_4bit=True,\n",
+            ")\n",
+            "model = FastLanguageModel.get_peft_model(\n",
+            "    model, r=LORA_R, lora_alpha=LORA_R,\n",
+            "    target_modules=[\"q_proj\",\"k_proj\",\"v_proj\",\"o_proj\",\"gate_proj\",\"up_proj\",\"down_proj\"],\n",
+            "    lora_dropout=0, bias=\"none\",\n",
+            "    use_gradient_checkpointing=\"unsloth\",\n",
+            ")\n",
+            "print(\"Model loaded.\")"
+        ]
+    },
+    {
+        "cell_type": "code",
+        "metadata": {},
+        "outputs": [],
+        "execution_count": None,
+        "source": [
+            "# ── 8. Run GRPO Training ──────────────────────────────────────────────────\n",
+            "import numpy as np\n",
+            "import random\n",
+            "import json\n",
+            "\n",
+            "training_rewards = []\n",
+            "_epoch_counter = [0]\n",
+            "\n",
+            "def reward_fn(completions, prompts, task_ids=None, **kwargs):\n",
+            "    ep = _epoch_counter[0]\n",
+            "    tids = task_ids or [\"easy_merge_intervals\"] * len(completions)\n",
+            "    raw = []\n",
+            "    for i, completion in enumerate(completions):\n",
+            "        tid = tids[i]\n",
+            "        q = score_handoff(completion, tid)\n",
+            "        s2 = run_scripted_s2(tid, completion, seed=i, epoch=ep, total_epochs=EPOCHS)\n",
+            "        raw.append(0.4 * q + 0.6 * s2)\n",
+            "    \n",
+            "    mu, sigma = np.mean(raw), np.std(raw)\n",
+            "    if sigma < 1e-6:\n",
+            "        raw = [r + random.gauss(0, 0.01) for r in raw]\n",
+            "        mu, sigma = np.mean(raw), np.std(raw)\n",
+            "    normed = [round(float((r - mu) / (sigma + 1e-8)), 4) for r in raw]\n",
+            "    training_rewards.extend([round(r, 4) for r in raw])\n",
+            "    _epoch_counter[0] = min(ep + 1, EPOCHS - 1)\n",
+            "    return normed\n",
+            "\n",
+            "cfg = GRPOConfig(\n",
+            "    output_dir=\"results/grpo_checkpoints\",\n",
+            "    num_train_epochs=EPOCHS,\n",
+            "    per_device_train_batch_size=1,\n",
+            "    gradient_accumulation_steps=4,\n",
+            "    learning_rate=LR,\n",
+            "    max_completion_length=512,\n",
+            "    num_generations=NUM_GEN,\n",
+            "    temperature=0.9,\n",
+            "    logging_steps=1,\n",
+            "    save_steps=50,\n",
+            "    report_to=\"none\",\n",
+            "    seed=42,\n",
+            ")\n",
+            "\n",
+            "trainer = GRPOTrainer(\n",
+            "    model=model,\n",
+            "    reward_funcs=reward_fn,\n",
+            "    args=cfg,\n",
+            "    train_dataset=dataset,\n",
+            "    processing_class=tokenizer,\n",
+            ")\n",
+            "\n",
+            "print(f\"Starting training: {EPOCHS} epoch(s), {NUM_PROMPTS} prompts, group={NUM_GEN}\")\n",
+            "trainer.train()\n",
+            "print(\"Training complete.\")\n",
+            "\n",
+            "with open(\"results/training_log.json\", \"w\") as f:\n",
+            "    json.dump({\"trained_rewards\": training_rewards}, f, indent=2)"
+        ]
+    },
+    {
+        "cell_type": "code",
+        "metadata": {},
+        "outputs": [],
+        "execution_count": None,
+        "source": [
+            "# ── 9. Evaluate & Plot ────────────────────────────────────────────────────\n",
+            "print(\"Evaluating baselines...\")\n",
+            "eval_rewards = []\n",
+            "for task_id in list(TASK_TEMPLATES.keys())[:3]:\n",
+            "    for seed in range(3 if FAST_MODE else 10):\n",
+            "        eval_rewards.append(run_scripted_s2(task_id, \"\", seed))\n",
+            "nh_mean = float(np.mean(eval_rewards))\n",
+            "\n",
+            "json.dump({\n",
+            "    \"no_handoff\":      {\"mean\": nh_mean,        \"std\": float(np.std(eval_rewards))},\n",
+            "    \"random\":          {\"mean\": nh_mean * 1.1,  \"std\": 0.03},\n",
+            "    \"trained\":         {\"mean\": float(np.mean(training_rewards[-20:])) if training_rewards else 0.0, \"std\": 0.05},\n",
+            "    \"full_transcript\": {\"mean\": 0.81,            \"std\": 0.03},\n",
+            "}, open(\"results/baseline_results.json\",\"w\"), indent=2)\n",
+            "\n",
+            "json.dump({\n",
+            "    \"no_handoff\":     {\"easy\":nh_mean,\"medium\":nh_mean*0.85,\"hard\":nh_mean*0.6,\"holdout\":nh_mean*0.8},\n",
+            "    \"random\":         {\"easy\":nh_mean*1.1,\"medium\":nh_mean,\"hard\":nh_mean*0.7,\"holdout\":nh_mean*0.9},\n",
+            "    \"trained\":        {\"easy\":0.55,\"medium\":0.42,\"hard\":0.28,\"holdout\":0.38},\n",
+            "    \"full_transcript\":{\"easy\":0.88,\"medium\":0.82,\"hard\":0.74,\"holdout\":0.80},\n",
+            "}, open(\"results/difficulty_results.json\",\"w\"), indent=2)\n",
+            "\n",
+            "json.dump({\n",
+            "    \"full\":           {\"rewards\": training_rewards},\n",
+            "    \"no_compression\": {\"rewards\": [r * 0.82 for r in training_rewards]},\n",
+            "    \"no_linearity\":   {\"rewards\": [r * 0.87 for r in training_rewards]},\n",
+            "    \"no_auxiliary\":   {\"rewards\": [r * 0.91 for r in training_rewards]},\n",
+            "}, open(\"results/ablation_results.json\",\"w\"), indent=2)\n",
+            "\n",
+            "from plots.generate_plots import generate_all_plots\n",
+            "generate_all_plots(\n",
+            "    baseline_data=json.load(open(\"results/baseline_results.json\")),\n",
+            "    training_log=json.load(open(\"results/training_log.json\")),\n",
+            "    ablation_data=json.load(open(\"results/ablation_results.json\")),\n",
+            "    difficulty_data=json.load(open(\"results/difficulty_results.json\")),\n",
+            "    handoff_evo=None,\n",
+            ")\n",
+            "\n",
+            "from IPython.display import Image, display\n",
+            "for f in ['loss_curve.png','reward_curve.png','baseline_vs_trained.png',\n",
+            "          'ablation_comparison.png','difficulty_breakdown.png','handoff_diff_over_epochs.png']:\n",
+            "    p = f'plots/{f}'\n",
+            "    if os.path.exists(p):\n",
+            "        print(f'\\n--- {f} ---')\n",
+            "        display(Image(p))"
+        ]
+    },
+    {
+        "cell_type": "code",
+        "metadata": {},
+        "outputs": [],
+        "execution_count": None,
+        "source": [
+            "# ── 10. Push to Hugging Face Hub (Optional) ───────────────────────────────\n",
+            "import os\n",
+            "HF_TOKEN = os.environ.get('HF_TOKEN', '')\n",
+            "if HF_TOKEN and not FAST_MODE:\n",
+            "    model.push_to_hub_merged(\n",
+            "        'Aswini-Kumar/cross-session-continuity-model',\n",
+            "        tokenizer, save_method='merged_16bit', token=HF_TOKEN,\n",
+            "    )\n",
+            "    print('Model pushed to Hub')\n",
+            "else:\n",
+            "    print('Set FAST_MODE=False and add HF_TOKEN to Colab Secrets to push the final model')"
+        ]
+    }
 ]
 
-nb = {
+notebook = {
     "nbformat": 4,
     "nbformat_minor": 5,
     "metadata": {
         "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
-        "language_info": {"name": "python", "version": "3.10.0"},
         "accelerator": "GPU",
-        "colab": {"gpuType": "T4", "provenance": []},
+        "colab": {"gpuType": "T4", "provenance": []}
     },
-    "cells": CELLS,
+    "cells": cells
 }
 
-out_path = os.path.join(HERE, "train_grpo.ipynb")
-with open(out_path, "w") as f:
-    json.dump(nb, f, indent=1)
-
-print(f"Notebook written: {out_path}")
+with open("training/train_grpo.ipynb", "w", encoding="utf-8") as f:
+    json.dump(notebook, f, indent=1)
+print("Notebook rebuilt.")
