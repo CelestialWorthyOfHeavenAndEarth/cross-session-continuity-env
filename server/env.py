@@ -22,8 +22,8 @@ Key enforcement:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
+from uuid import uuid4
 
 from server.task_generator import TaskGenerator
 from server.session_manager import SessionManager
@@ -31,6 +31,14 @@ from server.sandbox import Sandbox
 from server.rewards.rubric import ContinuityRubric
 from server.rewards.auxiliary import AuxiliaryRewarder
 from server.handoff_validator import HandoffValidator
+
+try:
+    from models import ContinuityAction, ContinuityObservation
+except ImportError:
+    try:
+        from ..models import ContinuityAction, ContinuityObservation
+    except ImportError:
+        from models import ContinuityAction, ContinuityObservation
 
 # ---------------------------------------------------------------------------
 # OpenEnv base class — openenv-core package
@@ -40,14 +48,10 @@ try:
     from openenv.core.env_server.types import State
     _HAS_OPENENV = True
 except ImportError:
-    # Fallback stub when openenv-core is not installed (local dev / CI)
     class State:  # type: ignore[no-redef]
         def __init__(self, **kwargs):
-            for k, v in kwargs.items():
-                setattr(self, k, v)
-
+            for k, v in kwargs.items(): setattr(self, k, v)
     class _EnvBase:  # type: ignore[no-redef]
-        """Stub base: used when openenv-core is not installed."""
         pass
     _HAS_OPENENV = False
 
