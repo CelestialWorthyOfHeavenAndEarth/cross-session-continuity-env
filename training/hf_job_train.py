@@ -372,6 +372,15 @@ def main():
 
     trainer = GRPOTrainer(model=model, reward_funcs=reward_fn, args=cfg, train_dataset=dataset, processing_class=tokenizer)
     
+    # ── Unsloth 2026.4.x bug workaround ──────────────────────────────────────
+    # UnslothGRPOTrainer._generate_and_score_completions() accesses vision token
+    # attributes even on text-only models. Patch them to None so the attribute
+    # lookup succeeds and the check skips gracefully.
+    for _attr in ("image_token_id", "vision_start_token_id", "vision_end_token_id"):
+        if not hasattr(trainer, _attr):
+            setattr(trainer, _attr, None)
+    # ─────────────────────────────────────────────────────────────────────────
+    
     print(f"Starting training: {EPOCHS} epoch(s), {NUM_PROMPTS} prompts, group={NUM_GEN}")
     trainer.train()
     
