@@ -14,10 +14,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # ── Copy source ───────────────────────────────────────────────────────────────
-COPY models.py     .
-COPY client.py     .
-COPY openenv.yaml  .
-COPY server/       ./server/
+COPY models.py         .
+COPY client_http.py    .
+COPY openenv.yaml      .
+COPY server/           ./server/
 
 # ── Non-root user (HF Spaces security requirement) ────────────────────────────
 RUN useradd -m -u 1000 user && chown -R user /app
