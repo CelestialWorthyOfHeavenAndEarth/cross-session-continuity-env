@@ -323,7 +323,7 @@ def build_dataset(n: int):
             f"Rules: max 400 words, no full code blocks, be specific.\n\n"
             f"Handoff note:"
         )
-        records.append({"prompt": prompt, "task_id": task_id})
+        records.append({"prompt": prompt, "task_ids": task_id})  # 'task_ids' matches reward_fn kwarg
     return Dataset.from_list(records)
 
 # ── GRPO Training ─────────────────────────────────────────────────────────────
@@ -374,11 +374,12 @@ def main():
     
     # ── Unsloth 2026.4.x bug workaround ──────────────────────────────────────
     # UnslothGRPOTrainer._generate_and_score_completions() accesses vision token
-    # attributes even on text-only models. Patch them to None so the attribute
-    # lookup succeeds and the check skips gracefully.
+    # attributes even on text-only models. We MUST use -100 (not None) because
+    # Unsloth may call torch.tensor(protected) and torch.tensor([None]) crashes.
+    # -100 is a standard ignore_index sentinel; it is never a valid token ID.
     for _attr in ("image_token_id", "vision_start_token_id", "vision_end_token_id"):
         if not hasattr(trainer, _attr):
-            setattr(trainer, _attr, None)
+            setattr(trainer, _attr, -100)
     # ─────────────────────────────────────────────────────────────────────────
     
     print(f"Starting training: {EPOCHS} epoch(s), {NUM_PROMPTS} prompts, group={NUM_GEN}")
@@ -416,7 +417,10 @@ def main():
         "no_auxiliary":   {"rewards": [r * 0.91 for r in training_rewards]},
     }, open("results/ablation_results.json","w"), indent=2)
 
-    from plots.generate_plots import generate_all_plots
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location("generate_plots", os.path.join(os.path.dirname(__file__), "..", "plots", "generate_plots.py"))
+    _mod = _ilu.module_from_spec(_spec); _spec.loader.exec_module(_mod)
+    generate_all_plots = _mod.generate_all_plots
     generate_all_plots(
         baseline_data=json.load(open("results/baseline_results.json")),
         training_log=json.load(open("results/training_log.json")),
