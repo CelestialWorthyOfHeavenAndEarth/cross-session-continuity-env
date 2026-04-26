@@ -235,56 +235,75 @@ def _section(handoff, hdr):
         if p != -1 and p < end: end = p
     return handoff[start:end].strip()
 
+# Section weights: KEY FUNCTIONS and NEXT STEPS matter most for S2
+SECTION_WEIGHTS = {
+    "TASK:": 0.10, "COMPLETED:": 0.10, "REMAINING:": 0.15,
+    "KEY FUNCTIONS:": 0.25, "EDGE CASES:": 0.15, "NEXT STEPS:": 0.25,
+}
+
+# Key function names expected per task (what S2 needs to know)
+TASK_KEY_FNS = {
+    "easy_merge_intervals":  ["merge_intervals"],
+    "easy_stack":            ["Stack", "push", "pop", "peek"],
+    "easy_running_median":   ["RunningMedian", "add", "get_median"],
+    "medium_rate_limiter":   ["RateLimiter", "is_allowed", "burst_remaining"],
+    "medium_lru_cache":      ["LRUCache", "get", "put", "keys"],
+    "hard_topological_sort": ["TopologicalSort", "sort", "has_path", "parallel_layers"],
+}
+
 def score_handoff(handoff: str, task_id: str) -> float:
     """
-    Composite soft reward [0, 1].
+    Improved composite reward [0, 1].
 
-    1. Structure  (0.35) — each section present adds 0.35/6
-    2. Relevance  (0.30) — mentions key terms from the task description
-    3. Compression(0.20) — concise is better; degrades above 400 tokens
-    4. Actionable (0.15) — NEXT STEPS has numbered items
+    1. Structure   (0.35) — section-weighted (KEY FUNCTIONS+NEXT STEPS = 50% of this)
+    2. Fn coverage (0.25) — KEY FUNCTIONS section mentions required function names
+    3. Compression (0.20) — concise is better; sweet spot 100-300 tokens
+    4. Actionable  (0.20) — NEXT STEPS has ≥3 numbered items with specific verbs
     """
     if not handoff or not handoff.strip():
         return 0.0
 
     score = 0.0
 
-    # 1. Structure
-    for s in REQUIRED:
+    # 1. Structure — weighted by section importance
+    for s, w in SECTION_WEIGHTS.items():
         if s in handoff:
-            score += 0.35 / len(REQUIRED)
+            score += 0.35 * w  # w already sums to 1.0
 
-    # 2. Content relevance — key terms from task description
-    tmpl = TASK_TEMPLATES.get(task_id, {})
-    desc = tmpl.get("description", "")
-    # Extract meaningful words (length > 4, not stopwords)
-    stopwords = {"must","will","should","that","with","this","from","have","been"}
-    key_terms = [w for w in re.findall(r'\b[a-zA-Z_]{5,}\b', desc)
-                 if w.lower() not in stopwords][:10]
-    if key_terms:
-        hits = sum(1 for t in key_terms if t.lower() in handoff.lower())
-        score += 0.30 * (hits / len(key_terms))
+    # 2. Function name coverage in KEY FUNCTIONS section
+    kf_section = _section(handoff, "KEY FUNCTIONS:")
+    expected   = TASK_KEY_FNS.get(task_id, [])
+    if expected:
+        hits = sum(1 for fn in expected if fn.lower() in kf_section.lower())
+        score += 0.25 * (hits / len(expected))
 
-    # 3. Compression
+    # 3. Compression — sweet spot 100-300 tokens
     tokens = len(handoff.split())
-    if   tokens <= 150: score += 0.20
-    elif tokens <= 300: score += 0.15
-    elif tokens <= 400: score += 0.10
+    if   tokens <= 100: score += 0.15   # very tight (maybe too little)
+    elif tokens <= 250: score += 0.20   # sweet spot
+    elif tokens <= 400: score += 0.12
     elif tokens <= 600: score += 0.05
 
-    # 4. Actionability — numbered steps in NEXT STEPS
+    # 4. Actionability — NEXT STEPS with specific action verbs
     ns = _section(handoff, "NEXT STEPS:")
-    n_items = len(re.findall(r'\d+[.)]\s', ns))
+    n_items   = len(re.findall(r'\d+[.)]\s', ns))
+    has_verbs = bool(re.search(r'\b(implement|write|run|test|fix|add|complete|call|check)\b', ns, re.I))
     score += min(0.15, n_items * 0.05)
+    score += 0.05 if has_verbs else 0.0
 
     return round(min(score, 1.0), 4)
 
 
-def run_scripted_s2(task_id: str, handoff: str, seed: int = 0) -> float:
+def run_scripted_s2(task_id: str, handoff: str, seed: int = 0,
+                    epoch: int = 0, total_epochs: int = 1) -> float:
     """
-    Scripted Session 2: uses handoff quality to gate how complete the
-    implementation is. Better handoff → higher test pass rate.
-    Returns fraction of visible tests passing.
+    Semantic Scripted S2 — improved.
+
+    1. Parses KEY FUNCTIONS section to check if required names are mentioned
+       (semantic check, not just quality score gating).
+    2. Progressive strictness: early epochs lenient, later epochs require
+       specific function names in the handoff to get full reward.
+    3. Falls back to quality-gated implementation if sandbox unavailable.
     """
     from server.task_generator import TaskGenerator
     from server.session_manager import SessionManager
@@ -294,51 +313,103 @@ def run_scripted_s2(task_id: str, handoff: str, seed: int = 0) -> float:
     if not tmpl:
         return 0.0
 
-    # Build task
-    tg = TaskGenerator(tmpl["difficulty"])
+    tg   = TaskGenerator(tmpl["difficulty"])
     task = tg.sample(task_id=task_id, seed=seed)
-    sm = SessionManager()
-    task = sm.transition(task)   # wipe files
+    task = SessionManager().transition(task)
 
-    # Gate implementation completeness on handoff quality
+    # Progressive strictness threshold: starts at 0.3, rises to 0.6
+    strictness = 0.30 + 0.30 * (epoch / max(total_epochs - 1, 1))
+
+    # Semantic check: does KEY FUNCTIONS mention the right names?
+    kf_section = _section(handoff, "KEY FUNCTIONS:")
+    expected   = TASK_KEY_FNS.get(task_id, [])
+    fn_coverage = (sum(1 for fn in expected if fn.lower() in kf_section.lower())
+                   / max(len(expected), 1))
+
+    # Quality score (structure + compression + actionability)
     q = score_handoff(handoff, task_id)
+
+    # Combined gate: average quality + semantic coverage
+    gate = 0.5 * q + 0.5 * fn_coverage
     full_impl = FULL_IMPLS.get(task_id, "pass\n")
 
-    if q >= 0.70:
-        impl = full_impl                             # full reward
-    elif q >= 0.45:
-        # Partial: write correct core but miss some edge cases
+    if gate >= strictness + 0.3:
+        impl = full_impl
+    elif gate >= strictness:
         lines = full_impl.splitlines()
-        impl = "\n".join(lines[:max(len(lines)//2, 3)]) + "\n    pass\n"
-    elif q >= 0.20:
-        impl = "# Insufficient handoff\ndef placeholder(): pass\n"
+        impl  = "\n".join(lines[:max(len(lines)*2//3, 4)]) + "\n    pass\n"
+    elif gate >= strictness * 0.5:
+        lines = full_impl.splitlines()
+        impl  = "\n".join(lines[:max(len(lines)//3, 2)]) + "\n    pass\n"
     else:
-        impl = ""                                    # nothing written
+        impl = "# handoff too vague\ndef placeholder(): pass\n"
 
     task.files["solution.py"] = impl
-    sb = Sandbox(timeout=8)
-    result = sb.run_tests(task.files, task.test_code)
-    return result.passed / max(result.total, 1)
+    try:
+        result = Sandbox(timeout=8).run_tests(task.files, task.test_code)
+        return result.passed / max(result.total, 1)
+    except Exception:
+        # Sandbox unavailable (Windows dev) — fall back to gate score
+        return round(gate * 0.8, 4)
+
+
+# ── Contrastive example (shown in prompt to guide model) ─────────────────────
+_BAD_EXAMPLE = """TASK: do the thing
+COMPLETED: some stuff
+REMAINING: more stuff
+KEY FUNCTIONS: functions
+EDGE CASES: edge cases
+NEXT STEPS: finish it"""
+
+_GOOD_EXAMPLE = """TASK: implement merge_intervals(intervals) -> list[list[int]]
+COMPLETED:
+- sorted intervals by start: intervals.sort(key=lambda x: x[0])
+- basic merge loop works for non-touching cases
+REMAINING:
+- handle touching intervals [[1,2],[2,3]] -> [[1,3]]
+- handle empty input []
+KEY FUNCTIONS:
+- merge_intervals(intervals): main function, returns merged list
+EDGE CASES:
+- empty list -> return []
+- single interval -> return as-is
+- touching (not overlapping) intervals should merge
+NEXT STEPS:
+1. read_file solution.py
+2. fix merge condition: use <= not <
+3. run_tests to verify all 3 cases
+4. submit"""
 
 
 # ── Dataset builder ───────────────────────────────────────────────────────────
+DIFFICULTY_ORDER = ["easy", "easy", "medium", "medium", "hard"]  # curriculum
+
 def build_dataset(n: int):
-    """Build list of {prompt, task_id} dicts."""
+    """Build curriculum dataset: easy tasks first, hard tasks last."""
     from datasets import Dataset
-    task_ids = list(TASK_TEMPLATES.keys())
+
+    # Sort tasks by difficulty for curriculum
+    by_diff = {d: [] for d in ["easy", "medium", "hard"]}
+    for tid, tmpl in TASK_TEMPLATES.items():
+        by_diff[tmpl["difficulty"]].append(tid)
+
+    ordered = by_diff["easy"] * 3 + by_diff["medium"] * 2 + by_diff["hard"]
     records = []
     for i in range(n):
-        task_id = task_ids[i % len(task_ids)]
-        tmpl = TASK_TEMPLATES[task_id]
+        task_id = ordered[i % len(ordered)]
+        tmpl    = TASK_TEMPLATES[task_id]
         partial = PARTIAL_IMPLS.get(task_id, "# TODO\n")
         prompt = (
             f"You are ending Session 1 of a coding task.\n"
-            f"Session 2 will start COLD — only your handoff note survives.\n\n"
-            f"TASK: {tmpl['description']}\n\n"
-            f"CODE WRITTEN SO FAR:\n```python\n{partial}```\n\n"
-            f"Write a structured handoff note with these sections:\n"
-            f"TASK / COMPLETED / REMAINING / KEY FUNCTIONS / EDGE CASES / NEXT STEPS\n"
-            f"Max 400 words. No large code blocks. Be specific and actionable.\n\n"
+            f"Session 2 starts COLD — only your handoff note survives.\n\n"
+            f"TASK DESCRIPTION:\n{tmpl['description']}\n\n"
+            f"CODE SO FAR (Session 1 partial work):\n```python\n{partial}```\n\n"
+            f"Examples of BAD vs GOOD handoffs:\n"
+            f"BAD:\n{_BAD_EXAMPLE}\n\n"
+            f"GOOD:\n{_GOOD_EXAMPLE}\n\n"
+            f"Now write YOUR handoff note for the task above.\n"
+            f"Required sections: TASK / COMPLETED / REMAINING / KEY FUNCTIONS / EDGE CASES / NEXT STEPS\n"
+            f"Rules: max 400 words, no full code blocks, be specific.\n\n"
             f"Handoff note:"
         )
         records.append({"prompt": prompt, "task_id": task_id})
@@ -374,19 +445,36 @@ def main():
     print(f"Dataset: {len(dataset)} prompts")
 
     training_rewards = []
+    _epoch_counter = [0]   # mutable for closure
 
     def reward_fn(completions, prompts, task_ids=None, **kwargs):
-        """Called by GRPOTrainer for each batch of completions."""
-        rewards = []
+        """
+        Improved reward function:
+        - 40% handoff quality (section-weighted)
+        - 60% S2 test pass rate (semantic, progressive strictness)
+        - Intra-group normalization: ensures non-zero gradient even when
+          all rewards cluster together
+        """
+        ep  = _epoch_counter[0]
+        tids = task_ids or ["easy_merge_intervals"] * len(completions)
+        raw  = []
         for i, completion in enumerate(completions):
-            tid = (task_ids or ["easy_merge_intervals"]*len(completions))[i]
+            tid = tids[i]
             q   = score_handoff(completion, tid)
-            s2  = run_scripted_s2(tid, completion, seed=i)
-            # Composite: 40% quality + 60% actual test pass rate
-            r   = round(0.4 * q + 0.6 * s2, 4)
-            rewards.append(r)
-            training_rewards.append(r)
-        return rewards
+            s2  = run_scripted_s2(tid, completion, seed=i,
+                                  epoch=ep, total_epochs=EPOCHS)
+            raw.append(0.4 * q + 0.6 * s2)
+
+        # Normalize within this group so GRPO always has signal
+        mu, sigma = np.mean(raw), np.std(raw)
+        if sigma < 1e-6:   # all identical → add tiny diversity
+            raw = [r + random.gauss(0, 0.01) for r in raw]
+            mu, sigma = np.mean(raw), np.std(raw)
+        normed = [round(float((r - mu) / (sigma + 1e-8)), 4) for r in raw]
+
+        training_rewards.extend([round(r, 4) for r in raw])
+        _epoch_counter[0] = min(ep + 1, EPOCHS - 1)
+        return normed
 
     cfg = GRPOConfig(
         output_dir="results/grpo_checkpoints",
