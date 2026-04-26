@@ -36,35 +36,36 @@ class Action:
 
 S1_SYSTEM_PROMPT = """\
 You are working on a coding task in Session 1.
-Complete as much as possible within your step limit.
-When approaching the limit, call write_handoff() with a structured note:
-
-Required sections (all mandatory):
-  TASK:          one sentence — what the overall task is
-  COMPLETED:     bullet list — fully implemented + test-verified items
-  REMAINING:     bullet list — what Session 2 must still implement
-  KEY FUNCTIONS: function/class names, signatures, brief purpose
-  EDGE CASES:    constraints or tricky logic discovered in Session 1
-  NEXT STEPS:    ordered list — what Session 2 should do first
-
-Constraints:
-  - Max 400 tokens in handoff note.
-  - Max 5 lines of code in code blocks.
-  - All 6 sections must be present.
-  - You have a retry budget of 3 for invalid actions — use it wisely.
+Your goal: implement as much as possible, then write a handoff note for Session 2.
 
 Available tools: read_file, write_file, run_tests, write_handoff
+
+Call tools in ANY format — just mention the tool name clearly:
+  - "read_file solution.py"
+  - "I'll write_file to solution.py: <code>"
+  - {"tool": "run_tests"}
+  - write_file("solution.py", content="...")
+  - TOOL: write_handoff\nCONTENT: ...
+
+When you're done with Session 1, call write_handoff with a note containing:
+  TASK / COMPLETED / REMAINING / KEY FUNCTIONS / EDGE CASES / NEXT STEPS
+Keep it under 400 tokens. No full code dumps (max 5 lines of code).
 """
 
 S2_SYSTEM_PROMPT = """\
 You are in Session 2. You have NO memory of Session 1.
-Your ONLY information about what was done is the handoff note.
-
-Start by calling parse_handoff() to retrieve the note.
-Then use the note to continue the task.
-Do NOT rewrite everything from scratch — the note tells you what to build on.
+Your ONLY information is the handoff note — call parse_handoff first.
 
 Available tools: parse_handoff, read_file, write_file, run_tests, submit
+
+Call tools in ANY format — just mention the tool name:
+  - "parse_handoff"
+  - "I'll run_tests now"
+  - write_file("solution.py", content="...")
+  - TOOL: submit
+
+Do NOT rewrite everything from scratch. The note tells you what to build on.
+When tests pass, call submit.
 """
 
 
@@ -163,29 +164,66 @@ class Agent:
     @staticmethod
     def _parse_action(response: str) -> Optional[Action]:
         """
-        Parse LLM output into an Action.
+        Flexible parser — accepts any format that mentions a tool name.
 
-        Expected format:
-          TOOL: write_file
-          PATH: solution.py
-          CONTENT:
-          <content lines>
+        Handles all of these:
+          TOOL: write_file\\nPATH: solution.py\\nCONTENT: ...   (strict)
+          write_file("solution.py", content="...")              (function-call)
+          {"tool": "write_file", "path": "solution.py"}        (JSON)
+          I'll write to solution.py: ...                       (natural language)
+          ```write_file\\nsolution.py\\n...```                  (markdown)
+          run_tests                                             (bare word)
         """
         if not response:
             return None
 
-        tool_match = re.search(r"TOOL:\s*(\w+)", response, re.IGNORECASE)
-        if not tool_match:
+        TOOLS = [
+            "write_handoff", "parse_handoff",  # check longer names first
+            "read_file", "write_file", "run_tests", "submit",
+        ]
+
+        resp_lower = response.lower()
+
+        # ── Find which tool is mentioned ────────────────────────────────────
+        found_tool = None
+        for t in TOOLS:
+            if t.replace("_", " ") in resp_lower or t in resp_lower:
+                found_tool = t
+                break
+
+        if found_tool is None:
             return None
 
-        tool = tool_match.group(1).strip().lower()
-        path_match    = re.search(r"PATH:\s*(.+)", response, re.IGNORECASE)
-        content_match = re.search(r"CONTENT:\s*\n(.*)", response, re.IGNORECASE | re.DOTALL)
+        # ── Extract path (flexible) ──────────────────────────────────────────
+        path = ""
+        if found_tool in ("read_file", "write_file"):
+            # Try explicit PATH: label first
+            m = re.search(r"path[:\s]+([^\s\n\"']+\.py)", response, re.IGNORECASE)
+            if m:
+                path = m.group(1).strip()
+            else:
+                # Fall back: any .py filename mentioned
+                m = re.search(r"([\w/_-]+\.py)", response)
+                path = m.group(1) if m else "solution.py"
 
-        path    = path_match.group(1).strip()    if path_match    else ""
-        content = content_match.group(1).strip() if content_match else response
+        # ── Extract content (flexible) ───────────────────────────────────────
+        content = ""
+        if found_tool in ("write_file", "write_handoff"):
+            # Try CONTENT: label
+            m = re.search(r"content[:\s]*\n(.*)", response, re.IGNORECASE | re.DOTALL)
+            if m:
+                content = m.group(1).strip()
+            else:
+                # Try markdown code block
+                m = re.search(r"```(?:\w+)?\n(.*?)```", response, re.DOTALL)
+                if m:
+                    content = m.group(1).strip()
+                else:
+                    # Use everything after the tool name as content
+                    idx = resp_lower.find(found_tool) + len(found_tool)
+                    content = response[idx:].strip(" :\n\t")
 
-        return Action(tool=tool, path=path, content=content)
+        return Action(tool=found_tool, path=path, content=content)
 
     @staticmethod
     def _format_obs(obs: Dict[str, Any]) -> str:

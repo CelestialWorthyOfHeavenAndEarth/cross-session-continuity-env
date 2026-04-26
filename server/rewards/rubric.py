@@ -45,28 +45,30 @@ class ContinuityRubric:
         invalid_actions: int,
     ) -> RewardBreakdown:
 
-        # --- Component 1: Test correctness ---
-        # Hidden tests carry 40% of test_score — prevents visible-only overfitting.
+        # ── Component 1: Test correctness (soft — each test counts) ──────────
+        # Hidden tests carry 40% of test_score to prevent visible-test overfitting.
+        # Both visible and hidden pass rates are continuous (0.0 – 1.0), not binary.
         v_score = visible_results.passed / max(visible_results.total, 1)
         h_score = hidden_results.passed  / max(hidden_results.total,  1)
         test_score = round(0.6 * v_score + 0.4 * h_score, 4)
 
-        # --- Component 2: Handoff quality ---
+        # Compilation bonus: if code at least runs (partial credit even with 0 tests)
+        compile_bonus = 0.05 if visible_results.compiled else 0.0
+
+        # ── Component 2: Handoff quality (soft — each section adds score) ────
         quality_score = self._handoff_quality(handoff)
 
-        # --- Component 3: Linearity (Session 2 didn't thrash) ---
+        # ── Component 3: Linearity (soft — continuous, not binary) ───────────
         linearity_score = self._linearity(s2_edit_history, s2_failed_runs)
 
-        # --- Penalties ---
-        # Reconstruction penalty: S2 wrote large volumes to previously-empty files →
-        # likely reconstructed from pretrained knowledge, not the handoff note.
+        # ── Penalties (capped so one mistake doesn't kill the episode) ───────
         rewrite_penalty = self._rewrite_penalty(s2_edit_history)
+        action_penalty  = round(min(invalid_actions * 0.02, 0.10), 4)
 
-        # Invalid action penalty: caps at 0.10 so one retry doesn't kill the episode.
-        action_penalty = round(min(invalid_actions * 0.02, 0.10), 4)
-
+        # ── Total: all components contribute positively; penalties are small ──
         total = (
-            0.55 * test_score
+            0.50 * test_score
+            + compile_bonus
             + 0.20 * quality_score
             + 0.15 * linearity_score
             - rewrite_penalty

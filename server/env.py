@@ -163,16 +163,18 @@ class CrossSessionContinuityEnv(_EnvBase):
                 "done":     False,
             }
 
-        # Invalid action guard
+        # Invalid action guard — soft: deduct small amount, don't terminate early
         if not self._is_valid_action(action):
             self.invalid_action_count += 1
             self.retry_budget -= 1
             if self.retry_budget <= 0:
-                return {"done": True, "reward": 0.0, "error": "Retry budget exhausted."}
+                return {"done": True, "reward": 0.05, "error": "Retry budget exhausted. Partial credit awarded."}
             return {
-                "error":   f"Invalid action '{action.tool}' in session {self.session}.",
+                "error":        f"Invalid action '{action.tool}' in session {self.session}. "
+                                f"Valid tools: {self._valid_tools()}",
                 "retries_left": self.retry_budget,
-                "done":    False,
+                "auxiliary_reward": -0.01,   # tiny penalty, not episode-ending
+                "done":         False,
             }
 
         # Dispatch by tool
@@ -327,3 +329,8 @@ class CrossSessionContinuityEnv(_EnvBase):
         s1_tools = {"read_file", "write_file", "run_tests", "write_handoff"}
         s2_tools = {"parse_handoff", "read_file", "write_file", "run_tests", "submit"}
         return action.tool in (s1_tools if self.session == 1 else s2_tools)
+
+    def _valid_tools(self) -> str:
+        if self.session == 1:
+            return "read_file, write_file, run_tests, write_handoff"
+        return "parse_handoff, read_file, write_file, run_tests, submit"
