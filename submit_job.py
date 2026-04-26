@@ -37,7 +37,7 @@ try:
         env={
             "HF_TOKEN": TOKEN,
         },
-        flavor="nvidia-l4",  # Using L4 since 7B model training needs good VRAM
+        flavor="l4x1",  # Using L4 since 7B model training needs good VRAM
     )
 
     print(f"\n✅ Job submitted successfully!")
