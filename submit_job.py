@@ -35,7 +35,7 @@ try:
             "cd cross-session-continuity-env && "
             "pip install -r requirements.txt && "
             "pip install -q 'unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git' "
-            "trl>=0.15.0 datasets>=2.0.0 transformers>=4.40.0 accelerate>=0.30.0 matplotlib torchvision>=0.25.0 && "
+            "trl>=0.15.0 datasets>=2.0.0 'transformers==4.51.3' accelerate>=0.30.0 matplotlib torchvision>=0.25.0 && "
             "python3 training/hf_job_train.py"
         ],
         env={
