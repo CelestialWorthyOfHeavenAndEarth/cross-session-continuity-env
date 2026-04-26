@@ -27,7 +27,7 @@ print(f"  Hardware     : nvidia-l4 (~$0.80/hr)")
 
 try:
     job = api.run_job(
-        image="pytorch/pytorch:2.2.1-cuda12.1-cudnn8-runtime",
+        image="huggingface/transformers-pytorch-gpu:latest",
         command=[
             "bash", "-c",
             "apt-get update && apt-get install -y git && "
