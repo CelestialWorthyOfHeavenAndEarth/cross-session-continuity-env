@@ -1,5 +1,5 @@
 """
-client.py — Step 3: Create Client
+client_http.py — Step 3: Create Client (HTTPEnvClient subclass)
 
 EnvClient subclass for the Cross-Session Continuity environment.
 Connects over HTTP/WebSocket to the OpenEnv FastAPI server.
