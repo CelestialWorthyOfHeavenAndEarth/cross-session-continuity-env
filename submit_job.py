@@ -27,9 +27,12 @@ print(f"  Hardware     : nvidia-l4 (~$0.80/hr)")
 
 try:
     job = api.run_job(
-        image="registry.hf.space/aswini-kumar/cross-session-continuity-env:latest",
+        image="pytorch/pytorch:2.2.1-cuda12.1-cudnn8-runtime",
         command=[
             "bash", "-c",
+            "apt-get update && apt-get install -y git && "
+            "git clone https://github.com/CelestialWorthyOfHeavenAndEarth/cross-session-continuity-env.git && "
+            "cd cross-session-continuity-env && "
             "pip install -q 'unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git' "
             "trl>=0.15.0 datasets>=2.0.0 transformers>=4.40.0 accelerate>=0.30.0 matplotlib && "
             "python training/hf_job_train.py"
