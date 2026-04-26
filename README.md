@@ -6,6 +6,7 @@ colorTo: blue
 sdk: gradio
 sdk_version: 4.44.0
 app_file: app.py
+author: Aswini-Kumar
 pinned: true
 license: apache-2.0
 tags:
@@ -29,12 +30,12 @@ Session 1 works on the problem and writes a structured handoff note. Session 2 s
 
 | Item | Link |
 |------|------|
-| **HF Space (live demo)** | [spaces/YOUR_HF_USERNAME/cross-session-continuity-env](https://huggingface.co/spaces/YOUR_HF_USERNAME/cross-session-continuity-env) |
-| **Training Notebook (Colab)** | [training/train_grpo.ipynb](training/train_grpo.ipynb) |
-| **GitHub Repository** | [github.com/YOUR_USERNAME/cross-session-continuity-env](https://github.com/YOUR_USERNAME/cross-session-continuity-env) |
-| **Blog / Writeup** | [HF Blog Post](https://huggingface.co/blog/YOUR_USERNAME/cross-session-continuity) |
-| **Demo Video** | [YouTube](https://youtube.com/YOUR_VIDEO) |
-| **WandB Training Run** | [WandB](https://wandb.ai/YOUR_TEAM/cross-session-continuity) |
+| **HF Space (live demo)** | [Aswini-Kumar/cross-session-continuity-env](https://huggingface.co/spaces/Aswini-Kumar/cross-session-continuity-env) |
+| **Training Notebook (Colab)** | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/CelestialWorthyOfHeavenAndEarth/cross-session-continuity-env/blob/main/training/train_grpo.ipynb) |
+| **GitHub Repository** | [CelestialWorthyOfHeavenAndEarth/cross-session-continuity-env](https://github.com/CelestialWorthyOfHeavenAndEarth/cross-session-continuity-env) |
+| **Blog / Writeup** | [HF Blog Post](https://huggingface.co/blog/Aswini-Kumar/cross-session-continuity) *(update after posting)* |
+| **Demo Video** | [YouTube](https://youtube.com) *(update after recording)* |
+| **WandB Training Run** | [WandB](https://wandb.ai/Aswini-Kumar/cross-session-continuity) *(update after training)* |
 
 ---
 
