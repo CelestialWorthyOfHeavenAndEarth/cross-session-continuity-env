@@ -33,14 +33,23 @@ from server.rewards.auxiliary import AuxiliaryRewarder
 from server.handoff_validator import HandoffValidator
 
 # ---------------------------------------------------------------------------
-# MCPEnvironment base — graceful fallback if openenv not installed
+# OpenEnv base class — openenv-core package
 # ---------------------------------------------------------------------------
 try:
-    from openenv import MCPEnvironment as _MCPBase
+    from openenv.core.env_server.interfaces import Environment as _EnvBase
+    from openenv.core.env_server.types import State
+    _HAS_OPENENV = True
 except ImportError:
-    class _MCPBase:  # type: ignore[no-redef]
-        """Stub: used when openenv is not installed (local dev / CI)."""
+    # Fallback stub when openenv-core is not installed (local dev / CI)
+    class State:  # type: ignore[no-redef]
+        def __init__(self, **kwargs):
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
+    class _EnvBase:  # type: ignore[no-redef]
+        """Stub base: used when openenv-core is not installed."""
         pass
+    _HAS_OPENENV = False
 
 
 # ---------------------------------------------------------------------------
@@ -70,15 +79,16 @@ class Action:
 # Environment
 # ---------------------------------------------------------------------------
 
-class CrossSessionContinuityEnv(_MCPBase):
+class CrossSessionContinuityEnv(_EnvBase):
     """
     RL environment for cross-session coding continuity.
 
-    Inherits from openenv.MCPEnvironment (fallback stub when not installed).
-    Implements OpenEnv Gym-style: reset / step / state / close.
+    Inherits from openenv.core.env_server.interfaces.Environment.
+    Implements OpenEnv Gym-style: reset / step / state (property) / close.
     Registered tools: read_file, write_file, run_tests,
                       write_handoff, parse_handoff, submit.
     """
+
 
     def __init__(self, difficulty: str = "medium"):
         assert difficulty in STEP_LIMITS, f"Invalid difficulty: {difficulty}"
@@ -163,18 +173,19 @@ class CrossSessionContinuityEnv(_MCPBase):
         # Dispatch by tool
         return self._dispatch(action)
 
-    def state(self) -> Dict[str, Any]:
-        """Return current environment state dict."""
-        return {
-            "session":         self.session,
-            "step_count":      self.step_count,
-            "step_limit":      self.step_limit,
-            "handoff_written": self.handoff is not None,
-            "handoff_length":  len(self.handoff.split()) if self.handoff else 0,
-            "difficulty":      self.difficulty,
-            "invalid_actions": self.invalid_action_count,
-            "task_id":         self.task.task_id if self.task else None,
-        }
+    @property
+    def state(self) -> State:
+        """OpenEnv required: return current State object."""
+        return State(
+            session=self.session,
+            step_count=self.step_count,
+            step_limit=self.step_limit,
+            handoff_written=self.handoff is not None,
+            handoff_length=len(self.handoff.split()) if self.handoff else 0,
+            difficulty=self.difficulty,
+            invalid_actions=self.invalid_action_count,
+            task_id=self.task.task_id if self.task else None,
+        )
 
     # ------------------------------------------------------------------
     # Tool dispatch

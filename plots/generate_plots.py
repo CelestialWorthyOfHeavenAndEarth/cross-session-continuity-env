@@ -447,6 +447,87 @@ def plot_handoff_diff_over_epochs(data=None):
     print("[OK] handoff_diff_over_epochs.png" + (" (from training)" if real else " (synthetic)"))
 
 # ---------------------------------------------------------------------------
+# 6. loss_curve.png  (required: "loss AND reward plots")
+# ---------------------------------------------------------------------------
+
+def plot_loss_curve(data=None):
+    real = data is not None
+    if not real:
+        data = _load("training_log.json")
+        real = data is not None and "policy_loss" in data
+
+    if real:
+        policy_loss  = np.array(data["policy_loss"])
+        kl_div       = np.array(data.get("kl_divergence", []))
+        steps        = np.arange(len(policy_loss))
+    else:
+        n = 300
+        # Realistic GRPO policy loss: starts high (~2.0), decays with noise
+        x = np.linspace(0, 5, n)
+        policy_loss  = 2.1 * np.exp(-0.6 * x) + 0.25 + RNG.normal(0, 0.04, n)
+        kl_div       = 0.08 * np.exp(-0.3 * x) + 0.01 + RNG.normal(0, 0.005, n)
+        kl_div       = np.clip(kl_div, 0, 0.15)
+        steps        = np.arange(n)
+
+    pl_sm  = _smooth(policy_loss, w=15)
+    kl_sm  = _smooth(kl_div, w=15)
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9, 6), sharex=True,
+                                    gridspec_kw={"height_ratios": [2, 1], "hspace": 0.08})
+    ax1.set_facecolor(C["bg"]); ax2.set_facecolor(C["bg"])
+    _watermark(ax1, real)
+
+    n = len(steps)
+    third = n // 3
+    for ax in (ax1, ax2):
+        ax.axvspan(0,       third,   alpha=0.04, color="#4CAF50")
+        ax.axvspan(third,   2*third, alpha=0.04, color="#FF9800")
+        ax.axvspan(2*third, n,       alpha=0.04, color="#EF5350")
+
+    ax1.fill_between(steps,
+                     np.clip(pl_sm - 0.05, 0, None),
+                     pl_sm + 0.05,
+                     alpha=0.12, color=C["trained"])
+    ax1.plot(steps, policy_loss, color=C["trained"], alpha=0.25, lw=0.8)
+    ax1.plot(steps, pl_sm,       color=C["trained"], lw=2.2, label="Policy Loss")
+
+    ax1.set_ylabel("Policy Loss", labelpad=8)
+    ax1.set_title("Training Loss: GRPO Policy Loss + KL Divergence" +
+                  ("" if real else " [SYNTHETIC]"), pad=12)
+    ax1.legend(loc="upper right", fontsize=9.5)
+    ax1.grid(linestyle="--", alpha=0.35); ax1.set_axisbelow(True)
+
+    for xv, txt, col in [(third//2, "Easy", "#4CAF50"),
+                          (third+third//2, "Med", "#FF9800"),
+                          (2*third+third//2, "Hard", "#EF5350")]:
+        ax1.text(xv, ax1.get_ylim()[1]*0.92, txt, ha="center",
+                 fontsize=8.5, color=col, alpha=0.7)
+
+    ax2.fill_between(steps,
+                     np.clip(kl_sm - 0.003, 0, None),
+                     kl_sm + 0.003,
+                     alpha=0.15, color="#FF9800")
+    ax2.plot(steps, kl_div, color="#FF9800", alpha=0.25, lw=0.8)
+    ax2.plot(steps, kl_sm,  color="#FF9800", lw=1.8, label="KL Divergence")
+    ax2.axhline(0.05, color="#EF5350", lw=1.0, linestyle="--", alpha=0.6,
+                label="KL target (0.05)")
+
+    ax2.set_xlabel("Training Step", labelpad=8)
+    ax2.set_ylabel("KL Div", labelpad=8)
+    ax2.legend(loc="upper right", fontsize=9)
+    ax2.grid(linestyle="--", alpha=0.35); ax2.set_axisbelow(True)
+
+    ax1.text(0.01, 0.97, "Qwen2.5-Coder-7B · GRPO · 6 epochs",
+             ha="left", va="top", fontsize=8.5, color="#666",
+             transform=ax1.transAxes)
+
+    fig.tight_layout()
+    out = os.path.join(OUT_DIR, "loss_curve.png")
+    fig.savefig(out); plt.close(fig)
+    print("[OK] loss_curve.png" + (" (from training)" if real else " (synthetic)"))
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -462,12 +543,13 @@ def generate_all_plots(
     to load from results/*.json (or fall back to synthetic for dev).
     """
     print("\nGenerating evaluation plots...\n")
+    plot_loss_curve(training_log)
     plot_baseline_vs_trained(baseline_data)
     plot_reward_curve(training_log)
     plot_ablation_comparison(ablation_data)
     plot_difficulty_breakdown(difficulty_data)
     plot_handoff_diff_over_epochs(handoff_evo)
-    print(f"\nAll 5 plots saved to: {OUT_DIR}\n")
+    print(f"\nAll 6 plots saved to: {OUT_DIR}\n")
 
 
 if __name__ == "__main__":

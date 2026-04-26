@@ -1,7 +1,7 @@
 # ── HF Space runtime deps ──────────────────────────────────────────────────────
-# Gradio 5+ required — Python 3.13 removed audioop/pyaudioop which Gradio 4 used
 gradio>=5.0.0
 matplotlib>=3.9.0
 numpy>=1.26.0
 scipy>=1.13.0
 pandas>=2.2.0
+openenv-core>=0.1.0

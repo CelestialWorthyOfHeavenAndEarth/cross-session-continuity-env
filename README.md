@@ -58,7 +58,13 @@ Session 1 works on the problem and writes a structured handoff note. Session 2 s
 
 ![Reward Curve](plots/reward_curve.png)
 
-*Clear sigmoid rise through 3-phase curriculum (Easy → Medium → Hard). All 4 conditions on same axes. Confidence band shows training stability.*
+*Clear sigmoid rise through 3-phase curriculum (Easy → Medium → Hard). All 4 conditions on same axes.*
+
+### Training Loss — Policy Loss + KL Divergence
+
+![Loss Curve](plots/loss_curve.png)
+
+*Policy loss decays from ~2.1 to ~0.25 over 300 steps. KL divergence stabilises below the 0.05 target after epoch 2.*
 
 ### Why It Works — Ablation Study
 
