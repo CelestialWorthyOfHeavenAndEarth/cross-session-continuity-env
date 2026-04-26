@@ -1,0 +1,10 @@
+# .spaceignore — files excluded from HF Space build (like .dockerignore)
+Dockerfile
+.dockerignore
+training/
+evals/
+implementation (1).md
+server/tests/
+.pytest_cache/
+wandb/
+results/
