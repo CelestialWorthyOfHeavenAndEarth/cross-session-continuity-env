@@ -41,7 +41,7 @@ try:
         env={
             "HF_TOKEN": TOKEN,
         },
-        flavor="a10gx1",  # A10G: 24GB VRAM, faster than L4, needed without Unsloth
+        flavor="a10g-large",  # A10G: 24GB VRAM, faster than L4, needed without Unsloth
     )
 
     print(f"\n✅ Job submitted successfully!")
