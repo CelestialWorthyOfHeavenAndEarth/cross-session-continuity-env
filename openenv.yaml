@@ -6,7 +6,10 @@ description: >
   sessions with zero shared memory. The agent writes a structured handoff note
   at the end of session 1; session 2 receives only that note. Reward depends
   entirely on session 2 success.
-entry: server/env.py
+
+# Entry: module path to the MCPEnvironment subclass
+entry: server.env:CrossSessionContinuityEnv
+
 tools:
   - read_file
   - write_file
@@ -14,8 +17,12 @@ tools:
   - write_handoff
   - parse_handoff
   - submit
+
 sessions: 2
+
 difficulty_levels:
   - easy
   - medium
   - hard
+
+# Reserved names NOT used: reset, step, state, close

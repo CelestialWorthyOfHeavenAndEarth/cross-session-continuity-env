@@ -32,6 +32,16 @@ from server.rewards.rubric import ContinuityRubric
 from server.rewards.auxiliary import AuxiliaryRewarder
 from server.handoff_validator import HandoffValidator
 
+# ---------------------------------------------------------------------------
+# MCPEnvironment base — graceful fallback if openenv not installed
+# ---------------------------------------------------------------------------
+try:
+    from openenv import MCPEnvironment as _MCPBase
+except ImportError:
+    class _MCPBase:  # type: ignore[no-redef]
+        """Stub: used when openenv is not installed (local dev / CI)."""
+        pass
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -60,11 +70,14 @@ class Action:
 # Environment
 # ---------------------------------------------------------------------------
 
-class CrossSessionContinuityEnv:
+class CrossSessionContinuityEnv(_MCPBase):
     """
     RL environment for cross-session coding continuity.
 
-    Gym-style API compatible with OpenEnv MCPEnvironment interface.
+    Inherits from openenv.MCPEnvironment (fallback stub when not installed).
+    Implements OpenEnv Gym-style: reset / step / state / close.
+    Registered tools: read_file, write_file, run_tests,
+                      write_handoff, parse_handoff, submit.
     """
 
     def __init__(self, difficulty: str = "medium"):
@@ -285,6 +298,10 @@ class CrossSessionContinuityEnv:
             "visible_summary": visible.summary,
             "hidden_summary":  hidden.summary,
         }
+
+    def close(self) -> None:
+        """OpenEnv required: teardown. No-op for this environment."""
+        pass
 
     # ------------------------------------------------------------------
     # Helpers
