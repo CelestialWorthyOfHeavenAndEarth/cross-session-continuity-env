@@ -1,0 +1,21 @@
+name: cross-session-continuity-env
+version: 0.1.0
+theme: long-horizon-planning
+description: >
+  An RL environment where an LLM agent must complete a coding task across two
+  sessions with zero shared memory. The agent writes a structured handoff note
+  at the end of session 1; session 2 receives only that note. Reward depends
+  entirely on session 2 success.
+entry: server/env.py
+tools:
+  - read_file
+  - write_file
+  - run_tests
+  - write_handoff
+  - parse_handoff
+  - submit
+sessions: 2
+difficulty_levels:
+  - easy
+  - medium
+  - hard

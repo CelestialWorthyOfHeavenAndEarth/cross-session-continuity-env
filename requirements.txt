@@ -1,0 +1,16 @@
+openenv>=0.3.0
+unsloth>=2024.4.0
+trl>=0.8.6
+transformers>=4.40.0
+torch>=2.2.0
+datasets>=2.19.0
+accelerate>=0.29.0
+bitsandbytes>=0.43.0
+wandb>=0.17.0
+pytest>=8.1.0
+matplotlib>=3.9.0
+numpy>=1.26.0
+pandas>=2.2.0
+scipy>=1.13.0
+peft>=0.10.0
+sentencepiece>=0.2.0

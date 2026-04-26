@@ -1,0 +1,24 @@
+num_train_epochs: 6
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 8
+learning_rate: 2.0e-5
+reward_normalization: true
+clip_range: 0.2
+kl_coeff: 0.05
+warmup_steps: 50
+lr_scheduler_type: cosine
+weight_decay: 0.01
+max_grad_norm: 1.0
+seed: 42
+
+# Curriculum epochs
+curriculum:
+  epochs_1_2: easy
+  epochs_3_4: easy+medium
+  epochs_5_6: medium+hard
+
+# Logging
+report_to: wandb
+logging_steps: 10
+save_steps: 50
+eval_steps: 50

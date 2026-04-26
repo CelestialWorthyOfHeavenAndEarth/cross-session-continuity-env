@@ -1,0 +1,10 @@
+.dockerignore
+.gitignore
+.git/
+.pytest_cache/
+*.md
+wandb/
+results/
+*.ipynb_checkpoints/
+__pycache__/
+*.pyc
