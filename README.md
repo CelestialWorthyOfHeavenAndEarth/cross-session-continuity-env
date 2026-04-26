@@ -33,9 +33,8 @@ Session 1 works on the problem and writes a structured handoff note. Session 2 s
 | **HF Space (live demo)** | [Aswini-Kumar/cross-session-continuity-env](https://huggingface.co/spaces/Aswini-Kumar/cross-session-continuity-env) |
 | **Training Notebook (Colab)** | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/CelestialWorthyOfHeavenAndEarth/cross-session-continuity-env/blob/main/training/train_grpo.ipynb) |
 | **GitHub Repository** | [CelestialWorthyOfHeavenAndEarth/cross-session-continuity-env](https://github.com/CelestialWorthyOfHeavenAndEarth/cross-session-continuity-env) |
-| **Blog / Writeup** | [HF Blog Post](https://huggingface.co/blog/Aswini-Kumar/cross-session-continuity) *(update after posting)* |
-| **Demo Video** | [YouTube](https://youtube.com) *(update after recording)* |
-| **WandB Training Run** | [WandB](https://wandb.ai/Aswini-Kumar/cross-session-continuity) *(update after training)* |
+| **Writeup / Blog Post** | [BLOG.md](https://github.com/CelestialWorthyOfHeavenAndEarth/cross-session-continuity-env/blob/main/BLOG.md) — *"Teaching LLMs to Write Better Notes to Their Future Self"* |
+| **WandB Training Run** | [WandB](https://wandb.ai/Aswini-Kumar/cross-session-continuity) *(link after training run)* |
 
 ---
 

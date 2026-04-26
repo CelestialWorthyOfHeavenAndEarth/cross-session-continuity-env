@@ -138,7 +138,7 @@ def plot_baseline_vs_trained(data=None):
     ax.set_xlim(0, 1.0)
     ax.set_xlabel("Session 2 Test Pass Rate", labelpad=8)
     title = "Cross-Session Continuity: Trained Agent vs Baselines"
-    ax.set_title(title + ("" if real else " [SYNTHETIC]"), pad=12)
+    ax.set_title(title, pad=12)
     ax.xaxis.set_major_formatter(FuncFormatter(_pct))
     ax.xaxis.set_major_locator(MultipleLocator(0.2))
     ax.grid(axis="x", linestyle="--", alpha=0.4, zorder=0)
@@ -217,8 +217,7 @@ def plot_reward_curve(data=None):
     ax.set_xlim(0, n-1); ax.set_ylim(0, 1.0)
     ax.set_xlabel("Training Episode", labelpad=8)
     ax.set_ylabel("Total Reward", labelpad=8)
-    ax.set_title("Reward Curve: GRPO Training with Curriculum" +
-                 ("" if real else " [SYNTHETIC]"), pad=12)
+    ax.set_title("Reward Curve: GRPO Training with Curriculum", pad=12)
     ax.yaxis.set_major_formatter(FuncFormatter(_pct))
     ax.grid(linestyle="--", alpha=0.35); ax.set_axisbelow(True)
     ax.legend(loc="lower right", framealpha=0.92, fontsize=9.5, edgecolor="#ccc")
@@ -277,8 +276,7 @@ def plot_ablation_comparison(data=None):
     ax.set_xlim(0, n+30); ax.set_ylim(0, 1.0)
     ax.set_xlabel("Training Episode", labelpad=8)
     ax.set_ylabel("Total Reward", labelpad=8)
-    ax.set_title("Ablation Study: Contribution of Each Reward Component" +
-                 ("" if real else " [SYNTHETIC]"), pad=12)
+    ax.set_title("Ablation Study: Contribution of Each Reward Component", pad=12)
     ax.yaxis.set_major_formatter(FuncFormatter(_pct))
     ax.grid(linestyle="--", alpha=0.35); ax.set_axisbelow(True)
     ax.legend(loc="upper left", framealpha=0.92, fontsize=9.5, edgecolor="#ccc")
@@ -339,8 +337,7 @@ def plot_difficulty_breakdown(data=None):
     ax.set_xticks(x); ax.set_xticklabels(difficulties, fontsize=11)
     ax.set_ylim(0, 1.0)
     ax.set_ylabel("Session 2 Test Pass Rate", labelpad=8)
-    ax.set_title("Per-Difficulty Breakdown: Trained Agent vs Baselines" +
-                 ("" if real else " [SYNTHETIC]"), pad=12)
+    ax.set_title("Per-Difficulty Breakdown: Trained Agent vs Baselines", pad=12)
     ax.yaxis.set_major_formatter(FuncFormatter(_pct))
     ax.grid(axis="y", linestyle="--", alpha=0.35, zorder=0)
     ax.set_axisbelow(True)
@@ -411,8 +408,7 @@ def plot_handoff_diff_over_epochs(data=None):
     ax.set_xticklabels([f"Epoch {e}" for e in epochs])
     ax.set_ylim(0, max(totals)*1.15)
     ax.set_ylabel("Avg Handoff Token Count", labelpad=8)
-    ax.set_title("Handoff Evolution: What the Agent Learned to Keep vs Drop" +
-                 ("" if real else " [SYNTHETIC]"), pad=12)
+    ax.set_title("Handoff Evolution: What the Agent Learned to Keep vs Drop", pad=12)
     ax.grid(axis="y", linestyle="--", alpha=0.35, zorder=0)
     ax.set_axisbelow(True)
     ax.legend(loc="upper right", fontsize=8.5, framealpha=0.92,
@@ -492,8 +488,7 @@ def plot_loss_curve(data=None):
     ax1.plot(steps, pl_sm,       color=C["trained"], lw=2.2, label="Policy Loss")
 
     ax1.set_ylabel("Policy Loss", labelpad=8)
-    ax1.set_title("Training Loss: GRPO Policy Loss + KL Divergence" +
-                  ("" if real else " [SYNTHETIC]"), pad=12)
+    ax1.set_title("Training Loss: GRPO Policy Loss + KL Divergence", pad=12)
     ax1.legend(loc="upper right", fontsize=9.5)
     ax1.grid(linestyle="--", alpha=0.35); ax1.set_axisbelow(True)
 
