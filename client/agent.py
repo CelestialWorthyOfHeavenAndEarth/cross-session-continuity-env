@@ -149,6 +149,7 @@ class Agent:
         outputs = self.model.generate(
             **inputs,
             max_new_tokens=self.max_new_tokens,
+            max_length=None,          # suppress transformers max_length warning
             do_sample=True,
             temperature=0.7,
             pad_token_id=self.tokenizer.eos_token_id,
