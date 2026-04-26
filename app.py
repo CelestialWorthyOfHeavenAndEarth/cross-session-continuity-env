@@ -1,12 +1,10 @@
 """
-app.py  —  HuggingFace Space entry point
+app.py  —  HuggingFace Space entry point  (Gradio 5 compatible)
 
-Serves two things on port 7860:
-  1. A Gradio demo tab  —  shows a live 2-session episode side by side
-  2. An /api endpoint   —  JSON API so judges can curl the env directly
-
-OpenEnv runtime discovers the env via openenv.yaml (entry: server/env.py)
-and wraps it with MCP. This Gradio UI is the human-facing demo layer.
+Serves a Gradio demo with three tabs:
+  1. Live Episode   — deterministic 2-session run, no GPU needed
+  2. Training Results — gallery of 5 evaluation plots
+  3. Environment Info — architecture + reward table
 """
 
 import json
@@ -163,7 +161,6 @@ THEME = gr.themes.Soft(
     primary_hue="indigo",
     secondary_hue="blue",
     neutral_hue="slate",
-    font=gr.themes.GoogleFont("Inter"),
 )
 
 with gr.Blocks(theme=THEME, title="Cross-Session Continuity Env") as demo:
